@@ -4,11 +4,47 @@
 # Paths are relative to the workflow working directory unless absolute.
 # =====================================================================
 
-# ---- Inputs -----------------------------------------------------------
-samples: "config/samples.tsv"        # one row per genome (+ provenance)
-metadata: "config/metadata.tsv"      # ecological metadata, keyed by genome_id
-genomes_dir: "resources/genomes"     # nucleotide assemblies live here
-genome_extension: "fna"              # {genomes_dir}/{genome_id}.{extension}
+# ---- Analysis inputs (Phase 2 — produced by Phase 1 `snakemake preprocess`) ---
+# The analysis runs on the species-level, quality-filtered representatives that
+# preprocessing produces; do not edit these to point at raw genomes.
+# Single filtered table is the sole source of truth for the analysis (samples + metadata).
+samples: "results/preprocess/species_metadata.tsv"         # the one filtered, species-level table
+metadata: "results/preprocess/species_metadata.tsv"        # same file (taxonomy + QC + group_*/niche_* 0/1)
+genomes_dir: "results/preprocess/genomes"                  # representative genomes staged here (symlinks, .fna)
+genome_extension: "fna"                                    # extension of the STAGED analysis genomes
+
+# ---- Raw genome set + preprocessing (Phase 1 — `snakemake preprocess`) --------
+# 92k+ input genomes are classified (GTDB-Tk, batched), QC'd (CheckM2 + BBMap),
+# scored, quality-filtered, and collapsed to one representative per GTDB species,
+# unioning the niche/group presence-absence across each species' genomes.
+input:
+  metadata: "input_genomes_metadata_with_niches.tsv"  # genome_id, filename, source, group_*/niche_* (0/1)
+  genomes_dir: ""                                       # directory holding the input genome FASTAs (the `filename` column) — SET THIS
+  genome_extension: "fasta"                             # all input genomes are *.fasta
+  id_column: "genome_id"
+  filename_column: "filename"
+  source_column: "source"
+
+preprocess:
+  gtdbtk_batch_size: 20000        # genomes per GTDB-Tk / CheckM2 / BBMap batch
+  quality:
+    min_completeness: 90.0        # keep Completeness >= this
+    max_contamination: 5.0        # keep Contamination <= this
+    max_contigs: 1000             # keep n_contigs < this
+    min_n50: 5000                 # keep contig N50 > this (bp)
+    min_quality_score: 50.0       # keep quality_score > this
+  # quality_score = completeness - (5 * contamination)
+  keep_domain: "Archaea"          # after GTDB-Tk, keep only this domain (d__Archaea); "" disables the domain filter
+  niche_aggregation: "all"        # union group_*/niche_* over "all" input genomes of the species | "passing"
+  unclassified_species: "drop"    # novel/unassigned GTDB species (empty s__) are DROPPED | "singleton"
+  bbmap:                          # BBMap statswrapper.sh format=6 column names (parsed by header)
+    gc_col: "gc_avg"
+    length_col: "contig_bp"       # genome length = total contig bp
+    contigs_col: "n_contigs"
+    # BBMap's naming is reversed vs convention: ctg_L50 is the N50 *length* (bp),
+    # ctg_N50 is the L50 *count*. format=6 emits ctg_L50 in bp. If a build emits KB,
+    # merge_annotations logs a loud WARNING (the >5kb min_n50 filter is the lever).
+    n50_col: "ctg_L50"            # contig N50 length in bp
 
 results_dir: "results"
 logs_dir: "logs"
@@ -41,9 +77,8 @@ qc:
   tier_high_contamination: 5.0
   prodigal_mode: "single"        # consistent gene calls; "meta" only if many short contigs
 
-# ---- Dereplication ----------------------------------------------------
-dereplicate: true                # set false if assemblies are already GTDB species reps
-drep_ani: 0.95                   # secondary ANI; 0.95 == species
+# (Dereplication / dRep removed: preprocessing already collapses to one
+#  representative per GTDB species, so no dRep or extra QC is run before analysis.)
 
 # ---- Prometheus identification & validation ---------------------------
 prometheus:

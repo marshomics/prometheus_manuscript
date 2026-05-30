@@ -7,18 +7,22 @@
 # phylogenetic logistic framework as Stage 4 (phylolm::phyloglm), so a
 # habitat signal cannot masquerade as a clade signal.
 #
-# Predictors = the comma list passed in (e.g. biome_envo, oxygen,
-# temp_class, salinity_class, host_associated) PLUS two continuous
-# viral-pressure predictors appended from viral_summary: n_proviruses and
-# frac_rloop_proviruses (the anti-viral / R-loop tie-back, Stage 6.3-6.4).
+# Predictors = the SPECIES-LEVEL binary niche/group presence-absence
+# columns carried in the master table (every column matching ^(group|niche)_,
+# 0/1, autodetected — the legacy --predictors comma list is accepted but
+# ignored) PLUS two continuous viral-pressure predictors appended from
+# viral_summary: n_proviruses and frac_rloop_proviruses (the anti-viral /
+# R-loop tie-back, Stage 6.3-6.4).
 #
-# Categorical predictors are modelled as factors with rare levels (<3)
-# collapsed to 'other'; predictors with <2 usable levels or all-NA are
-# skipped. Every non-intercept term is reported; p-values are BH-adjusted
-# across ALL terms.
+# Each binary group_/niche_ predictor is tested only when both states are
+# present AND its prevalence (number of 1s) is >= 3; near-constant columns are
+# skipped. Continuous viral predictors are tested when they have >= 5 non-NA
+# values with variation. Every reported term's p-value is BH-adjusted across
+# ALL terms.
 #
 # Output (SCHEMA ecology/ecology_associations.tsv):
 #   predictor, level, model, estimate, std_error, p_value, p_adj, n, note
+#   (one row per niche/group predictor [level = "1"] or viral predictor)
 # Trivial input -> header-only TSV, quit(status=0).
 # =====================================================================
 
@@ -54,16 +58,6 @@ erow <- function(predictor, level, model, estimate = NA_real_, std_error = NA_re
   data.frame(predictor = predictor, level = level, model = model,
              estimate = estimate, std_error = std_error, p_value = p_value,
              p_adj = NA_real_, n = n, note = note, stringsAsFactors = FALSE)
-}
-
-# Collapse rare factor levels (<min_n) into 'other'; blanks -> NA.
-prep_factor <- function(v, min_n = 3) {
-  s <- trimws(as.character(v))
-  s[s == "" | tolower(s) %in% c("na", "nan", "none")] <- NA
-  tab <- table(s)
-  rare <- names(tab)[tab < min_n]
-  s[s %in% rare] <- "other"
-  factor(s)
 }
 
 main <- function() {
@@ -149,11 +143,15 @@ main <- function() {
       message("ecology_stats: phylolm unavailable; header-only."); return(invisible(NULL))
     }
 
-    # predictor list: the categorical/comma list + appended continuous viral
-    cat_preds <- trimws(strsplit(opt$predictors, ",")[[1]])
-    cat_preds <- cat_preds[nzchar(cat_preds)]
+    # predictor list: AUTODETECT the binary species-level group_/niche_
+    # presence-absence columns from the master table (the legacy --predictors
+    # comma list is accepted but ignored), then append the continuous viral
+    # predictors. group_ columns are reported before niche_, each block sorted.
+    eco_cols <- grep("^(group|niche)_", names(dat), value = TRUE)
+    bin_preds <- c(sort(grep("^group_", eco_cols, value = TRUE)),
+                   sort(grep("^niche_", eco_cols, value = TRUE)))
     cont_preds <- c("n_proviruses", "frac_rloop_proviruses")
-    all_preds <- unique(c(cat_preds, cont_preds))
+    all_preds <- unique(c(bin_preds, cont_preds))
 
     rows <- list()
 
@@ -186,44 +184,49 @@ main <- function() {
                     est, se, p, nrow(d),
                     "phylo logistic; continuous viral-pressure predictor (log-odds per unit)"))
       } else {
-        f <- prep_factor(d[[pname]], min_n = 3)
-        d$pred <- f
+        # binary 0/1 group_/niche_ presence-absence predictor.
+        # robust coerce: 1/true/yes/t -> 1, everything else (incl NA/blank) -> 0
+        d$pred <- as.integer(as_logical_col(d[[pname]]))
         d <- d[!is.na(d$pred) & !is.na(d$present), , drop = FALSE]
         if (nrow(d) < 5) return(erow(pname, NA_character_, "phyloglm", n = nrow(d),
                                      note = "fewer than 5 non-NA values; skipped"))
-        d$pred <- droplevels(d$pred)
-        if (nlevels(d$pred) < 2) return(erow(pname, NA_character_, "phyloglm",
-                                             n = nrow(d), note = "fewer than 2 usable levels; skipped"))
-        if (length(unique(d$present)) < 2) return(erow(pname, NA_character_, "phyloglm",
-                                                       n = nrow(d), note = "no presence variation in subset; skipped"))
+        prev <- sum(d$pred == 1L)
+        # need both states present AND prevalence >= 3 (skip near-constant)
+        if (length(unique(d$pred)) < 2)
+          return(erow(pname, "1", "phyloglm", n = nrow(d),
+                      note = "predictor constant in subset; skipped"))
+        if (prev < 3 || (nrow(d) - prev) < 3)
+          return(erow(pname, "1", "phyloglm", n = nrow(d),
+                      note = sprintf("prevalence too low (n1=%d, n0=%d, min 3); skipped",
+                                     prev, nrow(d) - prev)))
+        if (length(unique(d$present)) < 2)
+          return(erow(pname, "1", "phyloglm", n = nrow(d),
+                      note = "no presence variation in subset; skipped"))
         tr <- ape::keep.tip(tree, d$tip)
         rownames(d) <- d$tip; d <- d[tr$tip.label, , drop = FALSE]
         fit <- phylolm::phyloglm(present ~ pred, phy = tr, data = d,
                                  method = "logistic_MPLE", btol = 20)
         co <- summary(fit)$coefficients
-        ref <- levels(d$pred)[1]
-        # one row per non-intercept term
-        terms <- rownames(co)[rownames(co) != "(Intercept)"]
-        outl <- list()
-        for (tm in terms) {
-          lvl <- sub("^pred", "", tm)
-          est <- co[tm, "Estimate"]
-          se  <- if ("StdErr" %in% colnames(co)) co[tm, "StdErr"] else co[tm, 2]
-          pc  <- grep("p.value|Pr", colnames(co))
-          p   <- if (length(pc)) co[tm, pc[1]] else NA_real_
-          outl[[length(outl) + 1]] <- erow(
-            pname, lvl, "phyloglm(present~factor, MPLE)", est, se, p, nrow(d),
-            sprintf("phylo logistic; level vs reference '%s' (log-odds)", ref))
-        }
-        return(do.call(rbind, outl))
+        rn <- "pred"
+        est <- co[rn, "Estimate"]
+        se  <- if ("StdErr" %in% colnames(co)) co[rn, "StdErr"] else co[rn, 2]
+        pc  <- grep("p.value|Pr", colnames(co))
+        p   <- if (length(pc)) co[rn, pc[1]] else NA_real_
+        return(erow(pname, "1", "phyloglm(present~niche, MPLE)", est, se, p, nrow(d),
+                    "phylo logistic; species in group/niche (1) vs not (log-odds)"))
       }
     }
 
     for (pn in all_preds) {
       is_cont <- pn %in% cont_preds
       r <- tryCatch(fit_one(pn, is_cont), error = function(e)
-        erow(pn, NA_character_, "phyloglm", note = paste("failed:", conditionMessage(e))))
+        erow(pn, "1", "phyloglm", note = paste("failed:", conditionMessage(e))))
       rows[[length(rows) + 1]] <- r
+    }
+    if (length(rows) == 0) {
+      write_header_only(opt$out)
+      message("ecology_stats: no usable predictor; header-only.")
+      return(invisible(NULL))
     }
 
     out <- do.call(rbind, rows)

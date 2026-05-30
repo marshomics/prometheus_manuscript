@@ -34,6 +34,12 @@ def _load(path, name):
 # ---------------------------------------------------------------------------
 
 def plot_ecology_enrichment(associations, outdir):
+    """Forest/bar of the phylo-logistic log-odds (estimate) for each species-level
+    group_/niche_ presence-absence predictor, coloured by p_adj<0.05, sorted by
+    estimate, with a reference line at 0. The continuous viral predictors get
+    their own panel (plot_viral_rloop) and are excluded here. Top ~25 by
+    |estimate| are shown when there are many predictors.
+    """
     prefix = os.path.join(outdir, "ecology_enrichment")
 
     if associations is None:
@@ -45,23 +51,26 @@ def plot_ecology_enrichment(associations, outdir):
         return
 
     df = associations.dropna(subset=["estimate"]).copy()
+    # Keep only the ecology (group_/niche_) predictors for this figure.
+    if "predictor" in df.columns:
+        pred = df["predictor"].astype(str)
+        df = df[pred.str.startswith("group_") | pred.str.startswith("niche_")].copy()
     if df.empty:
-        placeholder(prefix, "no data: all estimate values are NaN")
+        placeholder(prefix, "no data: no group_/niche_ predictors with an estimate")
         return
 
-    # Row labels: predictor:level
-    labels = []
-    for _, row in df.iterrows():
-        parts = []
-        if "predictor" in df.columns and pd.notna(row.get("predictor")):
-            parts.append(str(row["predictor"]))
-        if "level" in df.columns and pd.notna(row.get("level")):
-            parts.append(str(row["level"]))
-        labels.append(":".join(parts) if parts else "?")
-    df["_label"] = labels
+    # Row label = predictor name (each group_/niche_ predictor is a single term).
+    df["_label"] = df["predictor"].astype(str).values
 
     p_adj = df.get("p_adj", df.get("p_value", pd.Series(np.ones(len(df)), index=df.index))).fillna(1.0)
-    sig = (p_adj < 0.05).values
+    df["_p_adj"] = p_adj.values
+
+    # Top ~25 by |estimate| when many predictors, then sort by estimate for display.
+    if len(df) > 25:
+        df = df.reindex(df["estimate"].abs().sort_values(ascending=False).index[:25])
+    df = df.sort_values("estimate")
+
+    sig = (df["_p_adj"] < 0.05).values
     colors = [OKABE_ITO["vermillion"] if s else OKABE_ITO["grey"] for s in sig]
 
     ci_lo = df.get("ci_low",  df["estimate"] - df.get("std_error", pd.Series(0, index=df.index)))
@@ -75,7 +84,7 @@ def plot_ecology_enrichment(associations, outdir):
     ax.set_yticks(y)
     ax.set_yticklabels(df["_label"].values, fontsize=5)
     ax.set_xlabel("Log-odds estimate")
-    ax.set_title("Ecology associations")
+    ax.set_title("Ecology (niche/group) associations")
     handles = [mpatches.Patch(color=OKABE_ITO["vermillion"], label="p_adj<0.05"),
                mpatches.Patch(color=OKABE_ITO["grey"], label="p_adj≥0.05")]
     ax.legend(handles=handles, frameon=False, fontsize=6)

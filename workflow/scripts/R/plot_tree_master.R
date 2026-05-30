@@ -7,7 +7,10 @@
 #   1. prometheus_tier  (A / B / C / none)
 #   2. methanogen       (TRUE / FALSE)
 #   3. methanogenesis_subtype
-#   4. biome_envo
+#   4. niche_richness   (rowSums of the species-level niche_* columns =
+#                        number of niches the species occupies; continuous heat)
+#      + a few high-level group_* presence rings (group_Human, group_Marine,
+#        group_Environments) when those columns are present
 #   5. proviral load    (n_proviruses, continuous heat)
 # Title notes the total inferred gains from --gains (gains_losses.tsv).
 # Saves {plot-prefix}.png/.svg via save_plot. Trivial / oversized-but-OK
@@ -130,8 +133,28 @@ main <- function() {
     sub <- trimws(as.character(m$methanogenesis_subtype))
     sub[is.na(sub) | sub == "" | sub == "NA"] <- "none"
     ann$subtype <- sub
-    biome <- trimws(as.character(m$biome_envo)); biome[is.na(biome) | biome == ""] <- "unknown"
-    ann$biome <- biome
+
+    # ---- ecology rings from the species-level niche_*/group_* columns ----- #
+    as_int01 <- function(x) {
+      v <- as_logical_col(x)
+      v2 <- suppressWarnings(as.numeric(as.character(x)))
+      as.integer(v | (!is.na(v2) & v2 != 0))
+    }
+    # niche richness = how many niche_* the species occupies (rowSums of 0/1)
+    niche_cols <- grep("^niche_", names(m), value = TRUE)
+    if (length(niche_cols)) {
+      nm <- as.data.frame(lapply(m[, niche_cols, drop = FALSE], as_int01))
+      ann$niche_richness <- rowSums(nm, na.rm = TRUE)
+    } else {
+      ann$niche_richness <- NA_real_
+    }
+    # optional high-level group rings (only those actually present in the table)
+    group_ring_cols <- intersect(c("group_Human", "group_Marine", "group_Environments"),
+                                 names(m))
+    for (gc in group_ring_cols) {
+      ann[[gc]] <- ifelse(as_int01(m[[gc]]) == 1L, "yes", "no")
+    }
+
     ann$n_proviruses <- suppressWarnings(as.numeric(as.character(m$n_proviruses)))
 
     n_tips <- length(tree$tip.label)
@@ -161,6 +184,17 @@ main <- function() {
                                    na.value = "grey95")
     }
 
+    # helper to add one continuous heat ring with its own fill scale
+    add_heat_ring <- function(p, df1col, name, low, high, width = 0.06, offset = 0) {
+      p2 <- p
+      if (requireNamespace("ggnewscale", quietly = TRUE))
+        p2 <- p2 + ggnewscale::new_scale_fill()
+      ggtree::gheatmap(p2, df1col, width = width, offset = offset,
+                       colnames = FALSE, color = NA) +
+        ggplot2::scale_fill_gradient(low = low, high = high, name = name,
+                                     na.value = "grey95")
+    }
+
     # offsets scale with tree depth; use a fraction of max branch distance
     depth <- tryCatch(max(ape::node.depth.edgelength(tree)), error = function(e) 1)
     if (!is.finite(depth) || depth <= 0) depth <- 1
@@ -179,20 +213,30 @@ main <- function() {
     p <- add_ring(p, data.frame(subtype = rn$subtype, row.names = rownames(rn)),
                   ok_palette(sort(unique(rn$subtype))),
                   "Methanogenesis\nsubtype", width = 0.06, offset = step * 2)
-    # ring 4: biome
-    p <- add_ring(p, data.frame(biome = rn$biome, row.names = rownames(rn)),
-                  ok_palette(sort(unique(rn$biome))),
-                  "Biome (ENVO)", width = 0.06, offset = step * 3)
-    # ring 5: proviral load (continuous)
-    if (requireNamespace("ggnewscale", quietly = TRUE))
-      p <- p + ggnewscale::new_scale_fill()
-    p <- ggtree::gheatmap(p, data.frame(n_proviruses = rn$n_proviruses,
-                                        row.names = rownames(rn)),
-                          width = 0.06, offset = step * 4, colnames = FALSE,
-                          color = NA) +
-      ggplot2::scale_fill_gradient(low = "#FFF7EC", high = "#7F0000",
-                                   name = "Proviral load\n(n_proviruses)",
-                                   na.value = "grey95")
+    # Running offset index so the ecology rings (variable in number) and the
+    # proviral ring never overlap. Rings 1-3 used indices 0,1,2.
+    ri <- 3
+    # ring 4: niche richness (continuous heat = number of niches occupied)
+    if ("niche_richness" %in% names(rn) && any(is.finite(rn$niche_richness))) {
+      p <- add_heat_ring(p, data.frame(niche_richness = rn$niche_richness,
+                                       row.names = rownames(rn)),
+                         "Niche richness\n(n niches)", "#F7FBFF", "#08306B",
+                         width = 0.06, offset = step * ri)
+      ri <- ri + 1
+    }
+    # ring 4b: optional high-level group presence rings (those present in table)
+    for (gc in group_ring_cols) {
+      lbl <- sub("^group_", "", gc)
+      p <- add_ring(p, setNames(data.frame(rn[[gc]], row.names = rownames(rn)), gc),
+                    c(yes = "#CC79A7", no = "grey92"),
+                    sprintf("In %s", lbl), width = 0.05, offset = step * ri)
+      ri <- ri + 1
+    }
+    # final ring: proviral load (continuous)
+    p <- add_heat_ring(p, data.frame(n_proviruses = rn$n_proviruses,
+                                     row.names = rownames(rn)),
+                       "Proviral load\n(n_proviruses)", "#FFF7EC", "#7F0000",
+                       width = 0.06, offset = step * ri)
 
     ttl <- if (!is.na(total_gains))
       sprintf("Archaeal Prometheus distribution (inferred independent acquisitions = %.2f)", total_gains)

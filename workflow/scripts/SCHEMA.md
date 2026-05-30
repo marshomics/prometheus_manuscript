@@ -5,13 +5,24 @@ Species-tree tips = `genome_id`. Gene-tree tips = combined protein id. Recover t
 genome from a protein id with `utils.genome_of()`. All tables are TSV with a header.
 Every script must tolerate empty inputs and still write a header-only output.
 
-## qc/genome_metadata.tsv  (aggregate_qc.py)
-genome_id, source, assembly_level, genome_type, completeness, contamination,
-genome_size, n_contigs, n50, gc, n_rrna, n_trna, quality_tier {A,B,C,fail},
-pass_primary {True,False}
+## preprocess/species_metadata.tsv  (filter_collapse.py) — the SINGLE filtered table (samples + metadata)
+genome_id, filename, source, classification, gtdb_domain..gtdb_species, assembly_path,
+completeness, contamination, gc, genome_size, n_contigs, n50, quality_score,
+n_genomes_in_species, n_passing_in_species, group_* and niche_* (0/1, unioned per
+species). This one table is both `config.samples` and `config.metadata`. Only
+genomes GTDB-Tk places in d__Archaea are retained (config preprocess.keep_domain).
+`assembly_path` is the staged genome each analysis step (Prodigal first) reads.
+BBMap columns used: gc=gc_avg, genome_size=contig_bp, n_contigs=n_contigs, n50=ctg_L50.
 
-## qc/genomeInfo.csv  (aggregate_qc.py; dRep format)
-genome,completeness,contamination   (genome = filename incl. extension)
+## genes/{genome}/{genome}.{faa,fna}  (prodigal_genes + rename_prodigal.py)
+Prodigal proteins (.faa) and CDS nucleotides (.fna). Headers are rewritten to
+`>{genome}_{N}` (N from 1), IDENTICAL for the matching protein and CDS so the two
+files stay consistent gene-by-gene. The .faa feeds DefenseFinder + downstream.
+
+## qc/genome_metadata.tsv  (cp of preprocess/genome_metadata.tsv)
+genome_id, source, completeness, contamination, genome_size, n_contigs, n50, gc,
+quality_tier {A}, pass_primary {True}.  No MAG/isolate genome_type — quality is
+represented by completeness / contamination / n_contigs / n50.
 
 ## prometheus/protein_map.tsv  (combine_proteomes.py)
 protein_id, genome_id, orig_id
@@ -56,8 +67,13 @@ completeness, contamination, quality_tier, pass_primary, genome_size,
 mcrA, n_mcr, methanogen, is_anme, methanogenesis_subtype,
 prometheus_present, prometheus_tier (best of A>B>C or ""), prometheus_n_loci,
 detect_defensefinder, n_defense_systems,
-isolation_source, environment_raw, biome_envo, material_envo, oxygen,
-temperature_c, temp_class, salinity, salinity_class, ph, host, host_associated
+group_* and niche_* (0/1, one column per group/niche; species-level
+presence-absence from the metadata table, group_* sorted then niche_*; absent
+genome -> 0)
+
+## scaffolds/ecology_harmonized.tsv  (build_master_table.py)
+genome_id, group_* and niche_* (0/1, one column per group/niche; the harmonized
+ecology subset of the master table)
 
 ## distribution/defense_matrix.tsv  (build_defense_matrix.py)
 genome_id, <one column per defense system type, 0/1> ... (includes Prometheus)
@@ -93,6 +109,9 @@ n_rloop_proviruses, frac_rloop_proviruses
 
 ## ecology/ecology_associations.tsv  (ecology_stats.R)
 predictor, level, model, estimate, std_error, p_value, p_adj, n, note
+(predictor is a binary species-level group_/niche_ column [level = "1"] or a
+continuous viral predictor {n_proviruses, frac_rloop_proviruses}; one phyloglm
+term per predictor; p_adj = BH across all reported terms.)
 
 ## synthesis/results_registry.tsv  (results_registry.py)
 family, test, term, estimate, ci_low, ci_high, p_value, p_adj, hypothesis {confirmatory,exploratory}

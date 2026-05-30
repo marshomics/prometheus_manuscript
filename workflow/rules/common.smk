@@ -5,6 +5,7 @@
 # =====================================================================
 import os
 import json
+import math
 import pandas as pd
 from snakemake.utils import validate, min_version
 
@@ -32,16 +33,53 @@ def cfg(path, default=None):
             return default
     return node
 
-# ---- samples ---------------------------------------------------------
-samples = pd.read_csv(config["samples"], sep="\t", dtype=str, comment="#").set_index("genome_id", drop=False)
-try:
-    validate(samples, "../schemas/samples.schema.yaml")
-except Exception as e:
-    print(f"[common] samples schema warning: {e}")
+# ---- raw input genome set + batching (Phase 1: preprocess) -----------
+INPUT_METADATA = cfg("input/metadata", "input_genomes_metadata_with_niches.tsv")
+INPUT_GENOMES_DIR = cfg("input/genomes_dir", "")
+INPUT_GENOME_EXT = cfg("input/genome_extension", "fasta")
+ID_COL = cfg("input/id_column", "genome_id")
+FILE_COL = cfg("input/filename_column", "filename")
+SRC_COL = cfg("input/source_column", "source")
+BATCH_SIZE = int(cfg("preprocess/gtdbtk_batch_size", 20000))
 
-GENOMES = samples["genome_id"].tolist()
+def _count_rows(path):
+    try:
+        with open(path) as fh:
+            return max(0, sum(1 for _ in fh) - 1)  # minus header
+    except Exception:
+        return 0
+
+N_INPUT = _count_rows(INPUT_METADATA)
+N_BATCHES = math.ceil(N_INPUT / BATCH_SIZE) if N_INPUT > 0 else 0
+BATCHES = [f"{i:04d}" for i in range(N_BATCHES)]
+
+# ---- analysis samples (species representatives; produced by Phase 1) --
+def _load_samples(path):
+    try:
+        df = pd.read_csv(path, sep="\t", dtype=str, comment="#")
+        if df.empty or "genome_id" not in df.columns:
+            return [], None
+        return df["genome_id"].tolist(), df.set_index("genome_id", drop=False)
+    except Exception:
+        return [], None
+
+GENOMES, samples = _load_samples(config["samples"])
+if not GENOMES:
+    print(f"[common] No analysis samples at {config['samples']} yet — run "
+          f"`snakemake preprocess` first (Phase 1). Phase-2 targets stay empty until then.")
+# Fail fast on the one ID assumption the whole pipeline rests on: combined protein
+# ids are '{genome}__{orig}' and utils.genome_of splits on the first '__', so a
+# genome_id must never itself contain '__' (would mis-recover the genome downstream).
+_bad_ids = [g for g in GENOMES if "__" in str(g)]
+if _bad_ids:
+    raise ValueError(
+        f"[common] {len(_bad_ids)} genome_id(s) contain '__' (e.g. {_bad_ids[:3]}); "
+        "this breaks the '{genome}__{orig}' id scheme. Rename them in the input metadata.")
 
 def genome_fasta(wildcards):
+    """Prodigal & co. read the staged representative assembly. This is exactly the
+    path recorded in the filtered table's `assembly_path` column (genomes_dir ==
+    GENOME_DIR == results/preprocess/genomes), staged by filter_collapse."""
     return os.path.join(GENOME_DIR, f"{wildcards.genome}.{EXT}")
 
 def json_domains():
@@ -61,7 +99,6 @@ def runtime_min(default=240):
 
 # ---- which detection tools to run vs ingest --------------------------
 RUN_DEFENSEFINDER = cfg("prometheus/run_defensefinder", True)
-DEREPLICATE = cfg("dereplicate", True)
 PER_DOMAIN_TREES = cfg("evolution/per_domain_trees", True)
 DOMAINS = list(cfg("prometheus/domains", {"DUF4011": {}, "DUF3320": {}, "DNA2": {}, "nuclease": {}, "REase": {}}).keys())
 RUN_GENERAX = cfg("evolution/reconciliation/run_generax", True)
@@ -69,6 +106,18 @@ RUN_ALE = cfg("evolution/reconciliation/run_ale", False)
 RUN_SELECTION = cfg("evolution/selection/run", True)
 SELECTION_METHODS = cfg("evolution/selection/methods", ["FEL", "MEME", "BUSTED", "aBSREL", "RELAX"])
 PLOT_FORMATS = cfg("plotting/formats", ["png", "svg"])
+
+# ---- Phase 1 (preprocess) targets ------------------------------------
+def preprocess_targets():
+    return [
+        f"{RESULTS}/preprocess/annotated_metadata.tsv",
+        f"{RESULTS}/preprocess/species_metadata.tsv",
+        f"{RESULTS}/preprocess/representatives.txt",
+        f"{RESULTS}/preprocess/genome_metadata.tsv",
+        f"{RESULTS}/preprocess/taxonomy.tsv",
+        f"{RESULTS}/preprocess/genomes/.staged",
+        f"{RESULTS}/preprocess/plots/preprocess_quality.png",
+    ]
 
 # ---- final targets ---------------------------------------------------
 def plot_targets():

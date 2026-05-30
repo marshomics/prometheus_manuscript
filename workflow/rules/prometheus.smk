@@ -160,7 +160,7 @@ rule validate_prometheus:
         ref_labels=rules.prometheus_validation_tree.output.labels,
         candidates=rules.assemble_candidates.output.candidates,
         meta=rules.genome_metadata.output.meta,
-        reps=rules.dereplicate.output.reps,
+        reps=rules.filter_collapse.output.reps_list,
         df_genes=expand(f"{RESULTS}/defense/defensefinder/{{genome}}/{{genome}}_defense_finder_genes.tsv", genome=GENOMES),
     output:
         catalog=f"{RESULTS}/prometheus/prometheus_catalog.tsv",

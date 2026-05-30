@@ -10,6 +10,7 @@
 # =====================================================================
 
 include: "rules/common.smk"
+include: "rules/preprocess.smk"
 include: "rules/qc.smk"
 include: "rules/prometheus.smk"
 include: "rules/diversity.smk"
@@ -23,6 +24,14 @@ include: "rules/synthesis.smk"
 rule all:
     input:
         all_targets()
+
+
+rule preprocess:
+    """Phase 1: classify (GTDB-Tk, batched), QC (CheckM2 + BBMap), score, quality-filter,
+    and collapse the raw genome set to one representative per GTDB species (unioning
+    niche/group presence-absence). Run this BEFORE the analysis."""
+    input:
+        preprocess_targets()
 
 
 rule provenance:

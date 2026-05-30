@@ -1,19 +1,14 @@
 $schema: "http://json-schema.org/draft-07/schema#"
-description: One row per genome
+description: >
+  The single filtered, species-level table (species_metadata.tsv) is both the
+  samples sheet and the metadata for the analysis. The only required key is
+  genome_id; taxonomy, QC (completeness/contamination/n_contigs/N50), and the
+  group_*/niche_* presence-absence columns travel in the same table. MAG/isolate
+  genome_type is intentionally absent.
 type: object
 properties:
   genome_id:
     type: string
-    description: Unique, stable genome identifier; file expected at {genomes_dir}/{genome_id}.{extension}
-  source:
-    type: string
-    description: Provenance (e.g. NCBI, GTDB, IMG, in-house)
-  assembly_level:
-    type: string
-    enum: ["complete", "chromosome", "scaffold", "contig", "unknown"]
-  genome_type:
-    type: string
-    enum: ["isolate", "MAG", "SAG", "unknown"]
+    description: Unique genome id; staged at {genomes_dir}/{genome_id}.{extension}
 required:
   - genome_id
-  - genome_type

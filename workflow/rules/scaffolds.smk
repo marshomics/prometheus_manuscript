@@ -1,44 +1,9 @@
 # =====================================================================
-# Stage 3 — reference scaffolds: GTDB taxonomy, archaeal species tree,
-# gene-based methanogen classification, ecology harmonization, master table.
+# Stage 3 — reference scaffolds: archaeal species tree (rooted), gene-based
+# methanogen classification, master table. GTDB taxonomy + genome QC come from
+# Phase-1 preprocessing (rules/preprocess.smk); only the species-tree marker MSA
+# is computed here, on the species representatives.
 # =====================================================================
-
-rule gtdbtk_classify:
-    """Standardized GTDB taxonomy for every genome."""
-    input:
-        genomes=expand(os.path.join(GENOME_DIR, "{genome}." + EXT), genome=GENOMES),
-    output:
-        summary=f"{RESULTS}/scaffolds/taxonomy_gtdbtk.tsv",
-    params:
-        gdir=GENOME_DIR,
-        ext=EXT,
-        data=cfg("db/gtdbtk_data", ""),
-        outdir=f"{RESULTS}/scaffolds/gtdbtk",
-        # Version-specific ANI-screen handling. 2.4+ uses skani; `--skip_ani_screen`
-        # avoids needing the screen DB. `--mash_db` was removed in 2.4 (do NOT pass it).
-        # Override here if your GTDB-Tk version differs.
-        extra=cfg("tree/gtdbtk_classify_extra", "--skip_ani_screen"),
-    log:
-        f"{LOGS}/gtdbtk/classify.log",
-    conda:
-        "../envs/gtdbtk.yaml"
-    threads: T_LARGE
-    resources:
-        mem_mb=lambda wc, attempt: mem_mb(wc, attempt, base=64000, per_attempt=32000),
-        runtime=1440,
-    shell:
-        r"""
-        mkdir -p {params.outdir} $(dirname {output.summary})
-        export GTDBTK_DATA_PATH={params.data}
-        gtdbtk classify_wf --genome_dir {params.gdir} -x {params.ext} \
-            --out_dir {params.outdir} --cpus {threads} {params.extra} > {log} 2>&1 || true
-        # The summary lands in out_dir/ or out_dir/classify/ depending on version;
-        # locate it wherever it is and normalise to a stable path.
-        s=$(find {params.outdir} -name '*ar53.summary.tsv' 2>/dev/null | head -n1)
-        if [ -n "$s" ]; then cp "$s" {output.summary}; \
-        else printf "user_genome\tclassification\n" > {output.summary}; fi
-        """
-
 
 rule gtdbtk_align:
     """Concatenated ar53 marker MSA for the de novo focal tree."""
@@ -80,7 +45,7 @@ rule species_tree:
     """ML archaeal species tree (IQ-TREE2, two-step PMSF for deep-node robustness)."""
     input:
         msa=rules.gtdbtk_align.output.msa,
-        taxonomy=rules.gtdbtk_classify.output.summary,
+        taxonomy=rules.filter_collapse.output.taxonomy,
     output:
         tree=f"{RESULTS}/scaffolds/species_tree.treefile",
     params:
@@ -194,13 +159,13 @@ rule build_master_table:
     """Join QC, taxonomy, tree tip, methanogen status, ecology, Prometheus, defense load."""
     input:
         meta=rules.genome_metadata.output.meta,
-        taxonomy=rules.gtdbtk_classify.output.summary,
+        taxonomy=rules.filter_collapse.output.taxonomy,
         tree=rules.species_tree.output.tree,
         methanogen=rules.methanogen_classify.output.calls,
         ecology=config["metadata"],
         catalog=rules.validate_prometheus.output.catalog,
         sensitivity=rules.validate_prometheus.output.sensitivity,
-        reps=rules.dereplicate.output.reps,
+        reps=rules.filter_collapse.output.reps_list,
         df_systems=expand(f"{RESULTS}/defense/defensefinder/{{genome}}/{{genome}}_defense_finder_systems.tsv", genome=GENOMES),
     output:
         master=f"{RESULTS}/scaffolds/master_table.tsv",

@@ -9,8 +9,8 @@ properties:
   results_dir: { type: string }
   logs_dir: { type: string }
   seed: { type: integer }
-  dereplicate: { type: boolean }
-  drep_ani: { type: number, minimum: 0.8, maximum: 1.0 }
+  input: { type: object }
+  preprocess: { type: object }
   db: { type: object }
   refs: { type: object }
   qc: { type: object }

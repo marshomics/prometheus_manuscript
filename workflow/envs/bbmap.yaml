@@ -1,0 +1,9 @@
+name: prometheus-bbmap
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - bbmap=39.06          # provides statswrapper.sh / stats.sh
+  - pandas=2.2.2
+  - openjdk=17

@@ -97,7 +97,7 @@ rule domain_trees:
 rule combined_cds:
     """Concatenate CDS (ffn) with genome-prefixed IDs (for codon alignment)."""
     input:
-        ffn=expand(f"{RESULTS}/genes/{{genome}}/{{genome}}.ffn", genome=GENOMES),
+        fna=expand(f"{RESULTS}/genes/{{genome}}/{{genome}}.fna", genome=GENOMES),
         samples=config["samples"],
     output:
         ffn=f"{RESULTS}/evolution/all_cds.ffn",
@@ -112,7 +112,7 @@ rule combined_cds:
     shell:
         r"""
         python workflow/scripts/py/combine_proteomes.py \
-            --samples {input.samples} --genes-dir {params.genes_dir} --suffix ffn \
+            --samples {input.samples} --genes-dir {params.genes_dir} --suffix fna \
             --out-faa {output.ffn} --out-map {output.map}
         """
 

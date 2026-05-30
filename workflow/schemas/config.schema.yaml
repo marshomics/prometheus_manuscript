@@ -1,0 +1,31 @@
+$schema: "http://json-schema.org/draft-07/schema#"
+description: Configuration for the Prometheus-in-archaea pipeline
+type: object
+properties:
+  samples: { type: string }
+  metadata: { type: string }
+  genomes_dir: { type: string }
+  genome_extension: { type: string }
+  results_dir: { type: string }
+  logs_dir: { type: string }
+  seed: { type: integer }
+  dereplicate: { type: boolean }
+  drep_ani: { type: number, minimum: 0.8, maximum: 1.0 }
+  db: { type: object }
+  refs: { type: object }
+  qc: { type: object }
+  prometheus: { type: object }
+  diversity: { type: object }
+  tree: { type: object }
+  methanogen: { type: object }
+  evolution: { type: object }
+  ecology: { type: object }
+  stats: { type: object }
+  plotting: { type: object }
+  threads: { type: object }
+required:
+  - samples
+  - genomes_dir
+  - genome_extension
+  - db
+  - refs

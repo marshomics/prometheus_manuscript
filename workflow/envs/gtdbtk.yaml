@@ -1,0 +1,8 @@
+name: prometheus-gtdbtk
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - gtdbtk=2.4.0
+  # GTDB-Tk pulls prodigal, hmmer, pplacer, fastani, mash, skani as dependencies.
+  # Set GTDBTK_DATA_PATH (config: db.gtdbtk_data) to the matching reference release.

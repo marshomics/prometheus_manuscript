@@ -1,0 +1,19 @@
+$schema: "http://json-schema.org/draft-07/schema#"
+description: One row per genome
+type: object
+properties:
+  genome_id:
+    type: string
+    description: Unique, stable genome identifier; file expected at {genomes_dir}/{genome_id}.{extension}
+  source:
+    type: string
+    description: Provenance (e.g. NCBI, GTDB, IMG, in-house)
+  assembly_level:
+    type: string
+    enum: ["complete", "chromosome", "scaffold", "contig", "unknown"]
+  genome_type:
+    type: string
+    enum: ["isolate", "MAG", "SAG", "unknown"]
+required:
+  - genome_id
+  - genome_type

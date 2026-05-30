@@ -1,0 +1,11 @@
+name: prometheus-selection
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - hyphy=2.5.62
+  - pal2nal=14.1
+  - biopython=1.83
+  - pandas=2.2.2
+  - numpy=1.26.4

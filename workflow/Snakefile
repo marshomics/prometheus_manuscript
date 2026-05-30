@@ -1,0 +1,48 @@
+# =====================================================================
+# Prometheus-in-archaea: diversity, distribution, evolution, taxonomy,
+# ecology. Snakemake implementation of the design in
+# ../Prometheus_archaea_pipeline_design.md
+#
+# Run (Grid Engine):
+#   snakemake --workflow-profile workflow/profiles/sge --use-conda --jobs 200
+# Dry run / DAG check:
+#   snakemake -n -p
+# =====================================================================
+
+include: "rules/common.smk"
+include: "rules/qc.smk"
+include: "rules/prometheus.smk"
+include: "rules/diversity.smk"
+include: "rules/scaffolds.smk"
+include: "rules/distribution.smk"
+include: "rules/evolution.smk"
+include: "rules/ecology.smk"
+include: "rules/synthesis.smk"
+
+
+rule all:
+    input:
+        all_targets()
+
+
+rule provenance:
+    """Record tool and database versions for reproducibility."""
+    output:
+        f"{RESULTS}/provenance/versions.txt"
+    conda:
+        "envs/qc.yaml"
+    shell:
+        r"""
+        mkdir -p $(dirname {output})
+        {{
+          echo "# Prometheus pipeline provenance"
+          date -u +"generated_utc=%Y-%m-%dT%H:%M:%SZ"
+          echo "snakemake=$(snakemake --version 2>/dev/null || echo NA)"
+          echo "conda=$(conda --version 2>/dev/null || echo NA)"
+          for tool in checkm2 gtdbtk defense-finder mmseqs iqtree2 mafft clipkit \
+                      generax hyphy genomad checkv hmmsearch seqkit drep prodigal; do
+            v=$(command -v $tool >/dev/null 2>&1 && ($tool --version 2>&1 | head -n1) || echo "not-on-PATH-here")
+            echo "$tool=$v"
+          done
+        }} > {output}
+        """

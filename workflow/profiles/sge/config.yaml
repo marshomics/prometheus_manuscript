@@ -1,0 +1,19 @@
+# Grid Engine ("Sun"/SGE) workflow profile for Snakemake >= 8.
+# Requires:  pip install snakemake-executor-plugin-cluster-generic
+# Usage:     snakemake --workflow-profile workflow/profiles/sge --use-conda
+executor: cluster-generic
+cluster-generic-submit-cmd: "bash workflow/profiles/sge/sge-submit.sh {resources.mem_mb} {resources.runtime} {threads} {rule} {jobid}"
+cluster-generic-status-cmd: "bash workflow/profiles/sge/sge-status.sh"
+cluster-generic-cancel-cmd: "qdel"
+default-resources:
+  - "mem_mb=4000"
+  - "runtime=240"
+jobs: 200
+latency-wait: 90
+max-jobs-per-second: 5
+use-conda: true
+conda-frontend: mamba
+rerun-incomplete: true
+keep-going: true
+printshellcmds: true
+restart-times: 2

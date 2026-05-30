@@ -1,0 +1,8 @@
+# Ecological metadata, one row per genome_id. Leave fields blank if unknown
+# (the pipeline tracks and reports missingness; it never silently imputes).
+# environment_raw is your free text; biome_envo/material_envo are ENVO terms
+# (mapped automatically from environment_raw via config/envo_map.tsv if provided).
+genome_id	isolation_source	environment_raw	biome_envo	material_envo	oxygen	temperature_c	temp_class	salinity	salinity_class	ph	host	host_associated
+GCA_000001	cow rumen	rumen	ENVO:00002201	ENVO:00002006	anaerobic	39	mesophilic		non-saline	6.8	Bos taurus	TRUE
+GCA_000002	anaerobic digester	anaerobic digester			anaerobic	37	mesophilic		non-saline	7.2		FALSE
+GCA_000003	hydrothermal vent sediment	marine hydrothermal vent			anaerobic	85	hyperthermophilic	35	saline	6.0		FALSE

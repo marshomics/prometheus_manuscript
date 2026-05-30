@@ -1,0 +1,17 @@
+name: prometheus-phylo
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - mafft=7.526
+  - famsa=2.2.2
+  - clipkit=2.3.0
+  - iqtree=2.3.6
+  - pal2nal=14.1
+  - hmmer=3.4
+  - seqkit=2.8.2
+  - biopython=1.83
+  - dendropy=4.6.1
+  - pandas=2.2.2
+  - numpy=1.26.4

@@ -1,0 +1,4 @@
+genome_id	source	assembly_level	genome_type
+GCA_000001	NCBI	complete	isolate
+GCA_000002	NCBI	scaffold	MAG
+GCA_000003	GTDB	contig	MAG

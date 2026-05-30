@@ -1,0 +1,250 @@
+#!/usr/bin/env Rscript
+# =====================================================================
+# Stage 6 -- ecology: does Prometheus presence track environment, host
+# association, methanogenesis niche, or viral pressure BEYOND what the
+# phylogeny explains (design Stage 6; confounder #11: biome and clade are
+# deeply confounded in archaea)? Every predictor is tested in the SAME
+# phylogenetic logistic framework as Stage 4 (phylolm::phyloglm), so a
+# habitat signal cannot masquerade as a clade signal.
+#
+# Predictors = the comma list passed in (e.g. biome_envo, oxygen,
+# temp_class, salinity_class, host_associated) PLUS two continuous
+# viral-pressure predictors appended from viral_summary: n_proviruses and
+# frac_rloop_proviruses (the anti-viral / R-loop tie-back, Stage 6.3-6.4).
+#
+# Categorical predictors are modelled as factors with rare levels (<3)
+# collapsed to 'other'; predictors with <2 usable levels or all-NA are
+# skipped. Every non-intercept term is reported; p-values are BH-adjusted
+# across ALL terms.
+#
+# Output (SCHEMA ecology/ecology_associations.tsv):
+#   predictor, level, model, estimate, std_error, p_value, p_adj, n, note
+# Trivial input -> header-only TSV, quit(status=0).
+# =====================================================================
+
+suppressWarnings(suppressMessages({ library(optparse) }))
+
+OUT_COLS <- c("predictor", "level", "model", "estimate", "std_error",
+              "p_value", "p_adj", "n", "note")
+
+.script_path <- function() {
+  ca <- commandArgs(trailingOnly = FALSE)
+  m <- grep("^--file=", ca, value = TRUE)
+  if (length(m)) return(normalizePath(sub("^--file=", "", m[1])))
+  ""
+}
+.this_dir <- tryCatch(dirname(.script_path()), error = function(e) ".")
+if (is.na(.this_dir) || !nzchar(.this_dir)) .this_dir <- "."
+tryCatch(
+  suppressWarnings(suppressMessages(source(file.path(.this_dir, "plotting_theme.R")))),
+  error = function(e) invisible(NULL)
+)
+
+write_header_only <- function(path) {
+  dir.create(dirname(path), showWarnings = FALSE, recursive = TRUE)
+  con <- file(path, "w"); writeLines(paste(OUT_COLS, collapse = "\t"), con); close(con)
+}
+
+as_logical_col <- function(x) {
+  s <- tolower(trimws(as.character(x))); s %in% c("true", "1", "yes", "t")
+}
+
+erow <- function(predictor, level, model, estimate = NA_real_, std_error = NA_real_,
+                 p_value = NA_real_, n = NA_integer_, note = "") {
+  data.frame(predictor = predictor, level = level, model = model,
+             estimate = estimate, std_error = std_error, p_value = p_value,
+             p_adj = NA_real_, n = n, note = note, stringsAsFactors = FALSE)
+}
+
+# Collapse rare factor levels (<min_n) into 'other'; blanks -> NA.
+prep_factor <- function(v, min_n = 3) {
+  s <- trimws(as.character(v))
+  s[s == "" | tolower(s) %in% c("na", "nan", "none")] <- NA
+  tab <- table(s)
+  rare <- names(tab)[tab < min_n]
+  s[s %in% rare] <- "other"
+  factor(s)
+}
+
+main <- function() {
+  option_list <- list(
+    make_option("--master", type = "character"),
+    make_option("--viral", type = "character"),
+    make_option("--tree", type = "character"),
+    make_option("--predictors", type = "character",
+                default = "biome_envo,oxygen,temp_class,salinity_class,host_associated"),
+    make_option("--fdr", type = "character", default = "BH"),
+    make_option("--seed", type = "integer", default = 12345),
+    make_option("--out", type = "character")
+  )
+  opt <- parse_args(OptionParser(option_list = option_list))
+  set.seed(opt$seed)
+
+  tryCatch({
+    stopifnot(!is.null(opt$master), !is.null(opt$tree), !is.null(opt$out))
+
+    suppressWarnings(suppressMessages({
+      library(ape); library(readr); library(dplyr)
+    }))
+
+    tree_txt <- tryCatch(paste(readLines(opt$tree, warn = FALSE), collapse = ""),
+                         error = function(e) "")
+    if (!nzchar(trimws(tree_txt)) || grepl("^\\(\\s*\\)\\s*;?$", trimws(tree_txt))) {
+      write_header_only(opt$out)
+      message("ecology_stats: trivial/empty tree; header-only."); return(invisible(NULL))
+    }
+    tree <- tryCatch(read.tree(opt$tree), error = function(e) NULL)
+    # Safety net: phyloglm assumes a rooted tree. The pipeline roots
+    # species_tree.treefile upstream; midpoint-root here only as a fallback.
+    if (!is.null(tree) && length(tree$tip.label) >= 3 && !ape::is.rooted(tree))
+      tree <- tryCatch(phangorn::midpoint(tree), error = function(e) tree)
+    if (is.null(tree) || length(tree$tip.label) < 5) {
+      write_header_only(opt$out)
+      message("ecology_stats: <5 tree tips; header-only."); return(invisible(NULL))
+    }
+
+    master <- readr::read_tsv(opt$master, show_col_types = FALSE, progress = FALSE)
+    if (nrow(master) == 0 || !"genome_id" %in% names(master)) {
+      write_header_only(opt$out)
+      message("ecology_stats: empty master; header-only."); return(invisible(NULL))
+    }
+    master$genome_id <- trimws(as.character(master$genome_id))
+
+    # ---- merge viral summary by genome_id -------------------------- #
+    if (!is.null(opt$viral) && file.exists(opt$viral)) {
+      viral <- tryCatch(readr::read_tsv(opt$viral, show_col_types = FALSE,
+                                        progress = FALSE),
+                        error = function(e) NULL)
+      if (!is.null(viral) && nrow(viral) > 0 && "genome_id" %in% names(viral)) {
+        viral$genome_id <- trimws(as.character(viral$genome_id))
+        keep_v <- intersect(c("genome_id", "n_proviruses", "frac_rloop_proviruses"),
+                            names(viral))
+        master <- dplyr::left_join(master, viral[, keep_v, drop = FALSE],
+                                   by = "genome_id")
+      }
+    }
+    if (!"n_proviruses" %in% names(master)) master$n_proviruses <- NA_real_
+    if (!"frac_rloop_proviruses" %in% names(master)) master$frac_rloop_proviruses <- NA_real_
+
+    # response
+    master$present <- as.integer(as_logical_col(master$prometheus_present))
+
+    # restrict to pass_primary genomes on the tree
+    pass <- as_logical_col(master$pass_primary)
+    tt <- if ("tree_tip" %in% names(master)) trimws(as.character(master$tree_tip)) else ""
+    has_tip <- nzchar(tt)
+    dat <- master[pass & has_tip, , drop = FALSE]
+    dat$tip <- trimws(as.character(dat$tree_tip))
+    dat <- dat[dat$tip %in% tree$tip.label, , drop = FALSE]
+    dat <- dat[!duplicated(dat$tip), , drop = FALSE]
+    if (nrow(dat) < 5 || length(unique(dat$present)) < 2) {
+      write_header_only(opt$out)
+      message("ecology_stats: <5 usable genomes or no presence variation; header-only.")
+      return(invisible(NULL))
+    }
+
+    have_phylolm <- requireNamespace("phylolm", quietly = TRUE)
+    if (!have_phylolm) {
+      write_header_only(opt$out)
+      message("ecology_stats: phylolm unavailable; header-only."); return(invisible(NULL))
+    }
+
+    # predictor list: the categorical/comma list + appended continuous viral
+    cat_preds <- trimws(strsplit(opt$predictors, ",")[[1]])
+    cat_preds <- cat_preds[nzchar(cat_preds)]
+    cont_preds <- c("n_proviruses", "frac_rloop_proviruses")
+    all_preds <- unique(c(cat_preds, cont_preds))
+
+    rows <- list()
+
+    fit_one <- function(pname, is_continuous) {
+      # Build a per-predictor data frame, drop NA, re-prune tree.
+      if (!pname %in% names(dat)) {
+        return(erow(pname, NA_character_, "phyloglm", note = "predictor not in master; skipped"))
+      }
+      d <- dat
+      if (is_continuous) {
+        d$pred <- suppressWarnings(as.numeric(as.character(d[[pname]])))
+        d <- d[!is.na(d$pred) & !is.na(d$present), , drop = FALSE]
+        if (nrow(d) < 5) return(erow(pname, NA_character_, "phyloglm", n = nrow(d),
+                                     note = "fewer than 5 non-NA values; skipped"))
+        if (length(unique(d$pred)) < 2) return(erow(pname, NA_character_, "phyloglm",
+                                                    n = nrow(d), note = "no variation; skipped"))
+        if (length(unique(d$present)) < 2) return(erow(pname, NA_character_, "phyloglm",
+                                                       n = nrow(d), note = "no presence variation in subset; skipped"))
+        tr <- ape::keep.tip(tree, d$tip)
+        rownames(d) <- d$tip; d <- d[tr$tip.label, , drop = FALSE]
+        fit <- phylolm::phyloglm(present ~ pred, phy = tr, data = d,
+                                 method = "logistic_MPLE", btol = 20)
+        co <- summary(fit)$coefficients
+        rn <- "pred"
+        est <- co[rn, "Estimate"]
+        se  <- if ("StdErr" %in% colnames(co)) co[rn, "StdErr"] else co[rn, 2]
+        pc  <- grep("p.value|Pr", colnames(co))
+        p   <- if (length(pc)) co[rn, pc[1]] else NA_real_
+        return(erow(pname, "continuous", "phyloglm(present~pred, MPLE)",
+                    est, se, p, nrow(d),
+                    "phylo logistic; continuous viral-pressure predictor (log-odds per unit)"))
+      } else {
+        f <- prep_factor(d[[pname]], min_n = 3)
+        d$pred <- f
+        d <- d[!is.na(d$pred) & !is.na(d$present), , drop = FALSE]
+        if (nrow(d) < 5) return(erow(pname, NA_character_, "phyloglm", n = nrow(d),
+                                     note = "fewer than 5 non-NA values; skipped"))
+        d$pred <- droplevels(d$pred)
+        if (nlevels(d$pred) < 2) return(erow(pname, NA_character_, "phyloglm",
+                                             n = nrow(d), note = "fewer than 2 usable levels; skipped"))
+        if (length(unique(d$present)) < 2) return(erow(pname, NA_character_, "phyloglm",
+                                                       n = nrow(d), note = "no presence variation in subset; skipped"))
+        tr <- ape::keep.tip(tree, d$tip)
+        rownames(d) <- d$tip; d <- d[tr$tip.label, , drop = FALSE]
+        fit <- phylolm::phyloglm(present ~ pred, phy = tr, data = d,
+                                 method = "logistic_MPLE", btol = 20)
+        co <- summary(fit)$coefficients
+        ref <- levels(d$pred)[1]
+        # one row per non-intercept term
+        terms <- rownames(co)[rownames(co) != "(Intercept)"]
+        outl <- list()
+        for (tm in terms) {
+          lvl <- sub("^pred", "", tm)
+          est <- co[tm, "Estimate"]
+          se  <- if ("StdErr" %in% colnames(co)) co[tm, "StdErr"] else co[tm, 2]
+          pc  <- grep("p.value|Pr", colnames(co))
+          p   <- if (length(pc)) co[tm, pc[1]] else NA_real_
+          outl[[length(outl) + 1]] <- erow(
+            pname, lvl, "phyloglm(present~factor, MPLE)", est, se, p, nrow(d),
+            sprintf("phylo logistic; level vs reference '%s' (log-odds)", ref))
+        }
+        return(do.call(rbind, outl))
+      }
+    }
+
+    for (pn in all_preds) {
+      is_cont <- pn %in% cont_preds
+      r <- tryCatch(fit_one(pn, is_cont), error = function(e)
+        erow(pn, NA_character_, "phyloglm", note = paste("failed:", conditionMessage(e))))
+      rows[[length(rows) + 1]] <- r
+    }
+
+    out <- do.call(rbind, rows)
+    # BH across all reported terms with a p-value.
+    method <- if (toupper(opt$fdr) %in% c("BH", "FDR")) "BH" else opt$fdr
+    pv <- which(!is.na(out$p_value))
+    if (length(pv)) out$p_adj[pv] <- stats::p.adjust(out$p_value[pv], method = method)
+    out <- out[, OUT_COLS, drop = FALSE]
+
+    dir.create(dirname(opt$out), showWarnings = FALSE, recursive = TRUE)
+    readr::write_tsv(out, opt$out)
+    message(sprintf("ecology_stats: %d predictor-terms -> %s", nrow(out), opt$out))
+    invisible(NULL)
+
+  }, error = function(e) {
+    message("ecology_stats: top-level error: ", conditionMessage(e))
+    tryCatch(write_header_only(opt$out), error = function(e2) invisible(NULL))
+    invisible(NULL)
+  })
+
+  quit(status = 0)
+}
+
+main()

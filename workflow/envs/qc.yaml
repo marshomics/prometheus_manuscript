@@ -1,0 +1,16 @@
+name: prometheus-qc
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - checkm2=1.0.2
+  - drep=3.5.0
+  - seqkit=2.8.2
+  - assembly-stats=1.0.1
+  - barrnap=0.9
+  - trnascan-se=2.0.12
+  - prodigal=2.6.3
+  - pyrodigal=3.5.2
+  - pandas=2.2.2
+  - numpy=1.26.4

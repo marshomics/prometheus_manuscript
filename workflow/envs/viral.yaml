@@ -1,0 +1,12 @@
+name: prometheus-viral
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - genomad=1.8.0
+  - checkv=1.0.3
+  - hmmer=3.4
+  - biopython=1.83
+  - pandas=2.2.2
+  - numpy=1.26.4

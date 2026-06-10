@@ -180,6 +180,7 @@ rule ancestral_states:
         master=rules.build_master_table.output.master,
     output:
         gl=f"{RESULTS}/evolution/ancestral/gains_losses.tsv",
+        gl_null=f"{RESULTS}/evolution/ancestral/gains_losses_null.tsv",
         plot_png=f"{RESULTS}/evolution/plots/ancestral_gain_loss.png",
         plot_svg=f"{RESULTS}/evolution/plots/ancestral_gain_loss.svg",
     params:
@@ -199,7 +200,8 @@ rule ancestral_states:
         mkdir -p {params.outdir} {params.plotdir}
         Rscript workflow/scripts/R/ancestral_states.R \
             --tree {input.tree} --master {input.master} --nsim {params.nsim} --seed {params.seed} \
-            --out {output.gl} --plot-prefix {params.plotdir}/ancestral_gain_loss > {log} 2>&1
+            --out {output.gl} --out-null {output.gl_null} \
+            --plot-prefix {params.plotdir}/ancestral_gain_loss > {log} 2>&1
         """
 
 

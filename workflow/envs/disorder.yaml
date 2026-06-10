@@ -1,0 +1,20 @@
+name: prometheus-disorder
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - pip=24.0
+  - pandas=2.2.2
+  - numpy=1.26.4
+  - biopython=1.83
+  # segmasker for low-complexity masking (disorder != low-complexity)
+  - blast=2.15.0
+  - pip:
+      # metapredict v2/v3: CPU, proteome-scale consensus disorder predictor (pulls torch)
+      - metapredict==2.6.5
+      # alphaPredict: predicted AlphaFold pLDDT from sequence -> the installable
+      # fallback 2nd predictor. The GOLD-STANDARD 2nd predictor is IUPred3, which is
+      # license-gated (free academic, register + download) and staged via
+      # config disorder.iupred3_path -- not installable here.
+      - alphaPredict==1.2

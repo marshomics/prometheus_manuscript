@@ -66,10 +66,13 @@ rule results_registry:
         selection=rules.selection.output.summary,
         reconciliation=rules.reconciliation.output.events,
         ancestral=rules.ancestral_states.output.gl,
+        disorder=(lambda wc: (f"{RESULTS}/disorder/disorder_associations.tsv"
+                              if DISORDER_ENABLED else [])),
     output:
         registry=f"{RESULTS}/synthesis/results_registry.tsv",
     params:
         fdr=cfg("stats/fdr_method", "BH"),
+        disorder_path=(f"{RESULTS}/disorder/disorder_associations.tsv" if DISORDER_ENABLED else ""),
     conda:
         "../envs/plotting.yaml"
     threads: T_SMALL
@@ -82,6 +85,7 @@ rule results_registry:
             --association {input.association} --cooccurrence {input.cooccurrence} \
             --ecology {input.ecology} --selection {input.selection} \
             --reconciliation {input.reconciliation} --ancestral {input.ancestral} \
+            --disorder "{params.disorder_path}" \
             --fdr {params.fdr} --out {output.registry}
         """
 

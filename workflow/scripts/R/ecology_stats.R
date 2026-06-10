@@ -163,6 +163,12 @@ main <- function() {
       d <- dat
       if (is_continuous) {
         d$pred <- suppressWarnings(as.numeric(as.character(d[[pname]])))
+        # Provirus counts scale with genome completeness and size, so a raw
+        # present~n_proviruses signal can be a genome-size/quality artefact. Adjust
+        # for completeness and scaled genome size (as the headline methanogen model
+        # does) before reporting any viral-pressure association.
+        d$completeness_n <- suppressWarnings(as.numeric(as.character(d$completeness)))
+        d$genome_size_n  <- suppressWarnings(as.numeric(as.character(d$genome_size)))
         d <- d[!is.na(d$pred) & !is.na(d$present), , drop = FALSE]
         if (nrow(d) < 5) return(erow(pname, NA_character_, "phyloglm", n = nrow(d),
                                      note = "fewer than 5 non-NA values; skipped"))
@@ -170,19 +176,39 @@ main <- function() {
                                                     n = nrow(d), note = "no variation; skipped"))
         if (length(unique(d$present)) < 2) return(erow(pname, NA_character_, "phyloglm",
                                                        n = nrow(d), note = "no presence variation in subset; skipped"))
+        covars <- character(0)
+        if (all(!is.na(d$completeness_n)) && length(unique(d$completeness_n)) > 1)
+          covars <- c(covars, "completeness_n")
+        if (all(!is.na(d$genome_size_n)) && length(unique(d$genome_size_n)) > 1) {
+          d$gs_scaled <- as.numeric(scale(d$genome_size_n)); covars <- c(covars, "gs_scaled")
+        }
+        if (nrow(d) < 5 || length(unique(d$present)) < 2 || length(unique(d$pred)) < 2)
+          return(erow(pname, "continuous", "phyloglm", n = nrow(d),
+                      note = "insufficient data after covariate adjustment; skipped"))
         tr <- ape::keep.tip(tree, d$tip)
         rownames(d) <- d$tip; d <- d[tr$tip.label, , drop = FALSE]
-        fit <- phylolm::phyloglm(present ~ pred, phy = tr, data = d,
-                                 method = "logistic_MPLE", btol = 20)
+        rhs <- paste(c("pred", covars), collapse = " + ")
+        fit <- phylolm::phyloglm(stats::as.formula(paste("present ~", rhs)), phy = tr,
+                                 data = d, method = "logistic_MPLE", btol = 20)
         co <- summary(fit)$coefficients
         rn <- "pred"
         est <- co[rn, "Estimate"]
         se  <- if ("StdErr" %in% colnames(co)) co[rn, "StdErr"] else co[rn, 2]
         pc  <- grep("p.value|Pr", colnames(co))
         p   <- if (length(pc)) co[rn, pc[1]] else NA_real_
-        return(erow(pname, "continuous", "phyloglm(present~pred, MPLE)",
-                    est, se, p, nrow(d),
-                    "phylo logistic; continuous viral-pressure predictor (log-odds per unit)"))
+        model_str <- if (length(covars)) {
+          sprintf("phyloglm(present~pred+%s, MPLE)", paste(covars, collapse = "+"))
+        } else {
+          "phyloglm(present~pred, MPLE)"
+        }
+        adj_note <- if (length(covars)) {
+          paste("adjusted for", paste(covars, collapse = "+"))
+        } else {
+          "UNADJUSTED (completeness/genome_size constant or NA)"
+        }
+        return(erow(pname, "continuous", model_str, est, se, p, nrow(d),
+                    paste("phylo logistic; continuous viral-pressure predictor;",
+                          adj_note, "(log-odds per unit)")))
       } else {
         # binary 0/1 group_/niche_ presence-absence predictor.
         # robust coerce: 1/true/yes/t -> 1, everything else (incl NA/blank) -> 0

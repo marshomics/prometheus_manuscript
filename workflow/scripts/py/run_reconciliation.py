@@ -167,7 +167,14 @@ def parse_events_txt(paths):
 
 
 def parse_nhx(paths):
-    """Count D/H/T tags in GeneRax NHX reconciliations as a fallback."""
+    """Count D/H/T tags in GeneRax NHX reconciliations as a fallback.
+
+    Only Duplication and Transfer are counted (these have unambiguous NHX tags).
+    Speciation is NOT inferred from `D=0` -- a `D=0` node can be a transfer or
+    origination, so counting every `D=0` as a speciation badly overcounts and would
+    corrupt the vertical fraction. We therefore leave Speciation at 0 on this fallback
+    path; the caller flags the vertical fraction as unavailable for NHX-only parses.
+    """
     counts = {e: 0 for e in EVENT_TYPES}
     found_any = False
     for path in paths:
@@ -183,12 +190,6 @@ def parse_nhx(paths):
             if n:
                 counts[etype] += n
                 found_any = True
-        # speciation = internal nodes that are not duplications/transfers; approximate
-        # by counting S= tags that carry a species assignment with D=0
-        n_spec = len(re.findall(r"D=0", txt))
-        if n_spec:
-            counts["Speciation"] += n_spec
-            found_any = True
     return (counts if found_any else None)
 
 
@@ -244,16 +245,20 @@ def run_generax(args, rows):
     events_files, nhx_files = find_generax_outputs(gdir)
     counts = parse_events_txt(events_files)
     note = "parsed *_events.txt"
+    nhx_only = False
     if counts is None:
         counts = parse_nhx(nhx_files)
-        note = "parsed NHX reconciliation"
+        note = "parsed NHX reconciliation (D/T only; speciation not counted)"
+        nhx_only = True
     if counts is None:
         utils.log("generax ran but no parseable reconciliation found")
         for e in EVENT_TYPES:
             rows.append(("generax", e, 0, "", "generax ran; no parseable output"))
         return None
 
-    frac = vertical_fraction(counts)
+    # vertical fraction needs a reliable Speciation count; on the NHX-only fallback we
+    # do not count speciations, so the fraction is left blank rather than misleading.
+    frac = "" if nhx_only else vertical_fraction(counts)
     for e in EVENT_TYPES:
         f = frac if e in ("Speciation", "Transfer") else ""
         rows.append(("generax", e, counts.get(e, 0), f, note))

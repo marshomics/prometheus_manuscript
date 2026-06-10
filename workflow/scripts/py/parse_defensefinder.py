@@ -42,15 +42,24 @@ def lookup_pid(pmap, genome_id, orig_id):
 
 
 def parse_defensefinder(df_dir: str, system: str, pmap: dict):
-    """Return list of (protein_id, genome_id, score, subtype) for matching systems."""
+    """Return (hits, total_systems_all_types, n_genome_dirs).
+
+    hits = list of (protein_id, genome_id, score, subtype) for matching systems.
+    total_systems_all_types counts EVERY DefenseFinder system row across all genomes
+    (any type), which the caller uses to distinguish "tool ran, Prometheus genuinely
+    absent" from "tool produced nothing" (a broken detector / wrong model set).
+    """
     hits = []
+    total_systems_all_types = 0
+    n_genome_dirs = 0
     if not df_dir or not os.path.isdir(df_dir):
-        return hits
+        return hits, total_systems_all_types, n_genome_dirs
 
     for genome_id in os.listdir(df_dir):
         gdir = os.path.join(df_dir, genome_id)
         if not os.path.isdir(gdir):
             continue
+        n_genome_dirs += 1
         sys_file = os.path.join(gdir, f"{genome_id}_defense_finder_systems.tsv")
         gene_file = os.path.join(gdir, f"{genome_id}_defense_finder_genes.tsv")
 
@@ -64,6 +73,7 @@ def parse_defensefinder(df_dir: str, system: str, pmap: dict):
             utils.log(f"WARNING: could not read systems file for '{genome_id}' "
                       f"({exc}); this genome is skipped — inspect {sys_file}")
             continue
+        total_systems_all_types += len(sdf)
         # type OR subtype, case-insensitive substring (handles 'Prometheus',
         # 'PrometheusTypeI', etc. across DefenseFinder model-name variants).
         sys_lower = system.lower()
@@ -113,7 +123,7 @@ def parse_defensefinder(df_dir: str, system: str, pmap: dict):
             pid = lookup_pid(pmap, genome_id, orig_id)
             hits.append((pid, genome_id, score, subtype))
 
-    return hits
+    return hits, total_systems_all_types, n_genome_dirs
 
 
 def main():
@@ -122,6 +132,9 @@ def main():
     ap.add_argument("--proteome", required=True)
     ap.add_argument("--pmap", required=True)
     ap.add_argument("--system", required=True)
+    ap.add_argument("--strict", default="True",
+                    help="FAIL (exit 1) if the proteome is non-empty but DefenseFinder "
+                         "produced zero systems of ANY type (broken detector / model set)")
     ap.add_argument("--out-candidates", required=True)
     ap.add_argument("--out-sources", required=True)
     ap.add_argument("--out-raw", required=True)
@@ -131,7 +144,26 @@ def main():
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
     pmap = load_pmap(args.pmap)
-    df_hits = parse_defensefinder(args.df_dir, args.system, pmap)
+    df_hits, total_systems, n_genome_dirs = parse_defensefinder(args.df_dir, args.system, pmap)
+
+    # --- strict detection sanity (complements the defensefinder_check preflight) ---
+    # A real run over archaeal species reps always carries SOME defense systems. If the
+    # proteome has sequences but DefenseFinder emitted zero systems of any type across
+    # every genome, the detector is broken (wrong models, failed runs) rather than the
+    # data being Prometheus-free; fail loudly instead of writing an empty catalog.
+    strict = str(args.strict).strip().lower() in ("true", "1", "yes")
+    proteome_nonempty = (os.path.exists(args.proteome)
+                         and os.path.getsize(args.proteome) > 0
+                         and len(utils.fasta_ids(args.proteome)) > 0)
+    if strict and proteome_nonempty and n_genome_dirs > 0 and total_systems == 0:
+        utils.log(
+            "FATAL: DefenseFinder produced ZERO systems of any type across "
+            f"{n_genome_dirs} genome(s) despite a non-empty proteome. This indicates a "
+            "broken detector or wrong model set, not a Prometheus-free dataset. "
+            "Check workflow/envs/defensefinder.yaml (defense-finder >= 2.0.0) and that "
+            "`defense-finder update` installed models >= 2.0.0. Set "
+            "prometheus.strict_detection=false to override (not recommended).")
+        sys.exit(1)
 
     # best (score, subtype) per protein id
     df_by_pid = {}

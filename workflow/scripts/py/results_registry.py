@@ -13,12 +13,29 @@ HEADER = (
     "p_value\tp_adj\thypothesis"
 )
 
-CONFIRMATORY_TERMS = [
-    "methanogen",
-    "relax",
-    "transfer",
-    "independent_acquisition",
-]
+# Confirmatory hypotheses are identified by (family, test, term), NOT by a substring
+# of the statistic name. Matching on the statistic alone mis-tagged RELAX (whose
+# statistic is "K") as exploratory and the naive-independence GLM baseline (term
+# "methanogen") as confirmatory. The four pre-registered confirmatory hypotheses are:
+#   (i)  methanogen<->Prometheus, phylogenetic logistic regression (NOT the naive GLM);
+#   (ii) selection-intensity shift on methanogen branches (RELAX);
+#   (iii) horizontal transfer of Prometheus (reconciliation);
+#   (iv) methanogen enrichment of independent acquisitions (ancestral mapping).
+def classify_hypothesis(family: str, test: str, term: str) -> str:
+    f, t, tm = str(family).lower(), str(test).lower(), str(term).lower()
+    if f == "association":
+        if "naive" in t:
+            return "exploratory"          # labelled baseline, never confirmatory
+        if "phyloglm" in t and "methanogen" in tm:
+            return "confirmatory"
+        return "exploratory"
+    if f == "selection":
+        return "confirmatory" if t == "relax" else "exploratory"
+    if f == "ancestral":
+        return "confirmatory" if "enrich" in t else "exploratory"
+    if f == "reconciliation":
+        return "confirmatory" if ("transfer" in tm or "transfer" in t) else "exploratory"
+    return "exploratory"
 
 
 def _coerce_p(v):
@@ -57,11 +74,6 @@ def bh_correction(pvals):
         prev_adj = adj
         out[orig_i] = adj
     return out
-
-
-def is_confirmatory(term: str) -> bool:
-    t_lower = str(term).lower()
-    return any(ct in t_lower for ct in CONFIRMATORY_TERMS)
 
 
 def safe_float(val):
@@ -145,6 +157,67 @@ def normalize_selection(df: pd.DataFrame):
     return rows
 
 
+def normalize_reconciliation(df: pd.DataFrame):
+    """Normalize reconciliation_events.tsv into canonical rows (transfer signal).
+
+    SCHEMA: tool, event, count, fraction, note. Reconciliation yields event COUNTS,
+    not p-values, so these rows carry no p_value (BH leaves p_adj blank) but are
+    recorded and tagged so the central registry truly collects every test. One row
+    per tool capturing the Transfer count + vertical fraction.
+    """
+    rows = []
+    for _, row in df.iterrows():
+        if str(row.get("event", "")).strip().lower() != "transfer":
+            continue
+        frac = row.get("fraction", "")
+        rows.append({
+            "family": "reconciliation",
+            "test": str(row.get("tool", "")).strip(),
+            "term": "transfer",
+            "estimate": safe_float(row.get("count")),
+            "ci_low": None,
+            "ci_high": None,
+            "p_value": None,
+            "note": f"vertical_fraction={frac}",
+        })
+    return rows
+
+
+def normalize_ancestral(df: pd.DataFrame):
+    """Normalize ancestral gains_losses.tsv into canonical rows.
+
+    SCHEMA: metric, value, note. The confirmatory TEST here is the methanogen
+    enrichment of independent acquisitions (`enrichment_p`); it is emitted with its
+    p-value so it enters the central FDR regime. The independent-acquisition count is
+    emitted as a descriptive (exploratory) row.
+    """
+    vals = {}
+    for _, row in df.iterrows():
+        vals[str(row.get("metric", "")).strip()] = row.get("value")
+    rows = []
+    if "enrichment_p" in vals:
+        rows.append({
+            "family": "ancestral",
+            "test": "methanogen_gain_enrichment",
+            "term": "methanogen_independent_acquisition_enrichment",
+            "estimate": safe_float(vals.get("gains_on_methanogen_branches")),
+            "ci_low": None,
+            "ci_high": None,
+            "p_value": safe_float(vals.get("enrichment_p")),
+        })
+    if "n_independent_acquisitions" in vals:
+        rows.append({
+            "family": "ancestral",
+            "test": "independent_acquisitions",
+            "term": "independent_acquisition_count",
+            "estimate": safe_float(vals.get("n_independent_acquisitions")),
+            "ci_low": None,
+            "ci_high": None,
+            "p_value": None,
+        })
+    return rows
+
+
 def load_table(path: str, normalizer):
     """Load and normalize a table; return [] on any error."""
     if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
@@ -165,7 +238,8 @@ def main():
     ap.add_argument("--cooccurrence", required=True)
     ap.add_argument("--ecology", required=True)
     ap.add_argument("--selection", required=True)
-    ap.add_argument("--prevalence", required=True)
+    ap.add_argument("--reconciliation", required=True)
+    ap.add_argument("--ancestral", required=True)
     ap.add_argument("--fdr", default="BH")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
@@ -177,7 +251,9 @@ def main():
     all_rows.extend(load_table(args.cooccurrence, normalize_cooccurrence))
     all_rows.extend(load_table(args.ecology, normalize_ecology))
     all_rows.extend(load_table(args.selection, normalize_selection))
-    # prevalence is not a test table per se; include if needed but schema has no p_value rows
+    # Evolutionary tests (now collected centrally so the FDR regime sees EVERY test):
+    all_rows.extend(load_table(args.reconciliation, normalize_reconciliation))
+    all_rows.extend(load_table(args.ancestral, normalize_ancestral))
 
     if not all_rows:
         utils.write_empty(args.out, HEADER)
@@ -192,9 +268,9 @@ def main():
         padj = bh_correction(pvals)
         df.loc[grp.index, "p_adj"] = padj
 
-    # hypothesis column
-    df["hypothesis"] = df["term"].apply(
-        lambda t: "confirmatory" if is_confirmatory(t) else "exploratory"
+    # hypothesis column (by family + test + term, not a statistic-name substring)
+    df["hypothesis"] = df.apply(
+        lambda r: classify_hypothesis(r["family"], r["test"], r["term"]), axis=1
     )
 
     # Reorder columns to match schema

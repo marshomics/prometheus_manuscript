@@ -180,7 +180,16 @@ main <- function() {
     num <- function(x) suppressWarnings(as.numeric(as.character(x)))
     dat$completeness_n      <- num(dat$completeness)
     dat$genome_size_n       <- num(dat$genome_size)
-    dat$n_defense_systems_n <- num(dat$n_defense_systems)
+    # Defense-richness control must EXCLUDE the focal Prometheus system, or the model
+    # conditions partly on its own response. Prefer the excl-Prometheus column; fall
+    # back to the total only if the new column is absent (older master tables).
+    if ("n_defense_systems_excl_prometheus" %in% names(dat)) {
+      dat$n_defense_systems_n <- num(dat$n_defense_systems_excl_prometheus)
+    } else {
+      dat$n_defense_systems_n <- num(dat$n_defense_systems)
+      message("association_tests: n_defense_systems_excl_prometheus absent; ",
+              "falling back to total defense count (includes Prometheus).")
+    }
 
     # =============================================================== #
     # (a) naive GLM -- baseline that ASSUMES INDEPENDENCE (labelled).
@@ -278,9 +287,9 @@ main <- function() {
         lo <- bci[1, "methanogen_bin"]; hi <- bci[2, "methanogen_bin"]
       }
       row_result("phyloglm_confounders",
-                 "phyloglm(present~methanogen+completeness+scale(genome_size)+n_defense_systems, MPLE)",
+                 "phyloglm(present~methanogen+completeness+scale(genome_size)+n_defense_excl_prometheus, MPLE)",
                  "methanogen", est, se, zstat, p, lo, hi, nrow(d),
-                 "HEADLINE: methanogen effect adjusted for completeness, genome size, total defense load (log-odds)")
+                 "HEADLINE: methanogen effect adjusted for completeness, genome size, and defense load EXCLUDING Prometheus (log-odds)")
     }, error = function(e) {
       row_result("phyloglm_confounders",
                  "phyloglm(present~methanogen+confounders, MPLE)", "methanogen",

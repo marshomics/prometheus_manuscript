@@ -31,7 +31,7 @@ import utils
 SUMMARY_HEADER = "method\tstatistic\tvalue\tp_value\tn_sites_or_branches\tnote"
 SITES_HEADER = "site\talignment_col\tdomain\tbeta_alpha_or_dnds\tp_value\tclassification"
 MIN_TIPS = 4
-SITE_PVAL = 0.1  # FEL/MEME positive-selection significance threshold
+SITE_PVAL = 0.1  # default FEL/MEME per-site significance threshold (configurable)
 
 
 # =========================================================================
@@ -175,7 +175,7 @@ def _col_idx(hdr_names, *candidates):
     return None
 
 
-def parse_fel(path):
+def parse_fel(path, site_pval=SITE_PVAL):
     """FEL: per-site alpha/beta + p-value. Return (n_pos_sites, site_records)."""
     js = load_json(path)
     if not js:
@@ -194,9 +194,9 @@ def parse_fel(path):
         except (TypeError, ValueError, IndexError):
             continue
         # beta>alpha => positive (diversifying); beta<alpha => negative (purifying)
-        if pval <= SITE_PVAL and beta > alpha:
+        if pval <= site_pval and beta > alpha:
             cls = "positive"
-        elif pval <= SITE_PVAL and beta < alpha:
+        elif pval <= site_pval and beta < alpha:
             cls = "negative"
         else:
             cls = "neutral"
@@ -208,7 +208,7 @@ def parse_fel(path):
     return n_pos, sites
 
 
-def parse_meme(path):
+def parse_meme(path, site_pval=SITE_PVAL):
     """MEME: per-site episodic positive selection p-value. Return (n_pos, sites)."""
     js = load_json(path)
     if not js:
@@ -224,7 +224,7 @@ def parse_meme(path):
             pval = float(r[i_p]) if i_p is not None else float("nan")
         except (TypeError, ValueError, IndexError):
             continue
-        cls = "positive" if pval <= SITE_PVAL else "neutral"
+        cls = "positive" if pval <= site_pval else "neutral"
         if cls == "positive":
             n_pos += 1
         stat = ""
@@ -301,10 +301,14 @@ def parse_relax(path):
 # RELAX branch labelling
 # =========================================================================
 def write_relax_labelled(gene_tree_path, methanogens, out_path):
-    """Write a newick where methanogen tips are name{Test}, others name{Reference}.
+    """Write a newick where methanogen TIPS are name{Test}, others name{Reference}.
 
-    Returns (n_test, n_reference). Uses HyPhy node-label syntax (label in braces
-    immediately after the taxon name). Falls back to no labelling if dendropy fails.
+    Only leaf branches are labelled: a gene tip is Test when its genome is a methanogen.
+    Internal branches (including methanogen-clade stems) are left unlabelled, so RELAX
+    contrasts selection intensity on TERMINAL methanogen lineages against the rest -- it
+    does not test whole methanogen clades (that would need ancestral reconstruction to
+    assign internal branches). Returns (n_test, n_reference). Uses HyPhy node-label
+    syntax (label in braces after the taxon name). Falls back to no labelling on failure.
     """
     try:
         t = load_tree(gene_tree_path)
@@ -422,6 +426,8 @@ def main():
     ap.add_argument("--methods", required=True, help="comma list: FEL,MEME,BUSTED,aBSREL,RELAX")
     ap.add_argument("--relax-partition", default="methanogen")
     ap.add_argument("--intact-only", default="True")
+    ap.add_argument("--site-pvalue", type=float, default=SITE_PVAL,
+                    help="FEL/MEME per-site significance threshold (default 0.1)")
     ap.add_argument("--run", default="True")
     ap.add_argument("--threads", type=int, default=1)
     ap.add_argument("--workdir", required=True)
@@ -489,17 +495,19 @@ def main():
     summary_rows = []
     fel_sites, meme_sites = [], []
 
+    site_pval = float(args.site_pvalue)
+
     # ---- FEL ----
     if "FEL" in methods:
         out = os.path.join(args.workdir, "FEL.json")
         if run_hyphy("fel", codon_path, tree_path, out):
-            n_pos, sites = parse_fel(out)
+            n_pos, sites = parse_fel(out, site_pval)
             fel_sites = sites
             if n_pos is None:
                 summary_rows.append(("FEL", "sites_positive", "", "", "", "ran; unparsed JSON"))
             else:
                 summary_rows.append(("FEL", "sites_positive", n_pos, "", n_pos,
-                                     f"p<={SITE_PVAL}, beta>alpha"))
+                                     f"p<={site_pval}, beta>alpha"))
         else:
             summary_rows.append(("FEL", "sites_positive", "", "", "", "skipped/failed"))
 
@@ -507,13 +515,13 @@ def main():
     if "MEME" in methods:
         out = os.path.join(args.workdir, "MEME.json")
         if run_hyphy("meme", codon_path, tree_path, out):
-            n_pos, sites = parse_meme(out)
+            n_pos, sites = parse_meme(out, site_pval)
             meme_sites = sites
             if n_pos is None:
                 summary_rows.append(("MEME", "sites_episodic", "", "", "", "ran; unparsed JSON"))
             else:
                 summary_rows.append(("MEME", "sites_episodic", n_pos, "", n_pos,
-                                     f"p<={SITE_PVAL}"))
+                                     f"p<={site_pval}"))
         else:
             summary_rows.append(("MEME", "sites_episodic", "", "", "", "skipped/failed"))
 
@@ -561,7 +569,9 @@ def main():
                     summary_rows.append(("RELAX", "K",
                                          (round(k, 4) if k is not None else ""),
                                          (round(p, 6) if p is not None else ""), "",
-                                         f"Test={n_test} methanogen, Reference={n_ref}"))
+                                         f"Test={n_test} terminal methanogen branches, "
+                                         f"Reference={n_ref}; internal branches unlabelled "
+                                         f"(K>1 intensified, K<1 relaxed on methanogen tips)"))
                 else:
                     summary_rows.append(("RELAX", "K", "", "", "", "skipped/failed"))
         else:

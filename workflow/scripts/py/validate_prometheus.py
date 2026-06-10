@@ -67,23 +67,57 @@ def domain_matches(hit_name: str, hit_acc: str, spec: dict) -> bool:
     return False
 
 
+def best_domain_for_hit(hit_name: str, hit_acc: str, domains: dict):
+    """Assign ONE configured domain category to a single hmm hit (or None).
+
+    The category name lists are permissive substrings and are NOT mutually exclusive
+    (e.g. a Pfam hit named "endonuclease" contains both "nuclease" -> nuclease and
+    "endonuclease" -> REase). Counting such a hit under both categories inflates
+    n_domains and can wrongly promote a locus across the tier-A / catalytic-intact
+    thresholds. To prevent that, each hit is assigned to at most one category:
+      1. an exact accession match wins (most specific, release-stable);
+      2. otherwise the category whose matched NAME token is longest (most specific
+         substring), ties broken by configured domain order.
+    """
+    name_l = str(hit_name).lower()
+    acc_base = str(hit_acc).split(".")[0]
+    # 1) accession exact match (version-suffix tolerant)
+    for dname, spec in domains.items():
+        for a in (spec or {}).get("accessions", []):
+            if a and (a == hit_acc or a.split(".")[0] == acc_base):
+                return dname
+    # 2) longest matching name token; tie -> configured order
+    order = list(domains.keys())
+    best_key = None
+    best_dname = None
+    for dname, spec in domains.items():
+        for n in (spec or {}).get("names", []):
+            nl = str(n).lower()
+            if nl and nl in name_l:
+                key = (len(nl), -order.index(dname))
+                if best_key is None or key > best_key:
+                    best_key, best_dname = key, dname
+    return best_dname
+
+
 def architecture_for(hits: list, domains: dict):
     """Return (architecture_string, n_domains, present_set) for one protein.
 
-    `hits` are the domtbl hit dicts for this protein (utils.parse_domtbl).
-    Present domains are ordered N->C by alignment start coordinate. When two
-    different domains overlap on the same residues, the lower start wins; ties
-    are broken by the configured domain order so output is deterministic.
+    `hits` are the domtbl hit dicts for this protein (utils.parse_domtbl). Each hit is
+    assigned to AT MOST ONE configured domain category (see best_domain_for_hit) so a
+    single Pfam hit can never count twice. Present domains are ordered N->C by the
+    earliest alignment start; ties break on the configured domain order.
     """
     domain_order = list(domains.keys())
     # earliest ali start at which each configured domain is observed
     first_start = {}
     for h in hits:
-        for dname, spec in domains.items():
-            if domain_matches(h.get("domain", ""), h.get("accession", ""), spec):
-                s = h.get("start", 10**9)
-                if dname not in first_start or s < first_start[dname]:
-                    first_start[dname] = s
+        dname = best_domain_for_hit(h.get("domain", ""), h.get("accession", ""), domains)
+        if dname is None:
+            continue
+        s = h.get("start", 10**9)
+        if dname not in first_start or s < first_start[dname]:
+            first_start[dname] = s
     present = sorted(
         first_start.keys(),
         key=lambda d: (first_start[d], domain_order.index(d)),
@@ -120,14 +154,17 @@ def catalytic_status(present: set, n_domains: int, has_domtbl: bool) -> str:
 # Phylogenetic separation
 # --------------------------------------------------------------------------- #
 def assign_by_tree(tree_path: str, ref_labels: dict):
-    """Map each candidate tip to 'Prometheus'/'Paralog' by nearest reference tip.
+    """Map each candidate tip to 'Prometheus'/'Paralog' by nearest-reference placement.
 
-    Uses dendropy's patristic (phylogenetic) distance matrix: for every tip in
-    the tree that is NOT a reference, find the reference tip at minimum patristic
-    distance and inherit its group. Candidates not in the tree, or trees with
-    <2 reference tips, yield 'Unplaced' for everything (the validation tree could
-    not separate the clades). dendropy is imported lazily so this module imports
-    even where dendropy is absent (e.g. during py_compile / unrelated tests).
+    This is a COARSE, first-pass 1-NN classifier: for every non-reference tip we take
+    the minimum patristic distance to the Prometheus reference set and to the paralog
+    (DNA2/NurA-HerA) reference set, and assign the candidate to whichever group is
+    nearer. An exact tie -> 'Unplaced'. It is sensitive to reference-set composition
+    and to long branches, and it only RAISES tier confidence; the rigorous placement /
+    residue-level catalytic call is deferred to the Stage-5 family alignment + gene tree
+    (design Stage 5). Candidates absent from the tree, or trees with < 2 reference tips,
+    yield 'Unplaced'. dendropy is imported lazily so this module imports even where
+    dendropy is absent (e.g. py_compile / unrelated tests).
 
     Returns dict {candidate_tip -> 'Prometheus'|'Paralog'|'Unplaced'}.
     """
@@ -165,23 +202,29 @@ def assign_by_tree(tree_path: str, ref_labels: dict):
         if lbl in ref_labels:
             continue  # references are not candidates
         cand_taxon = taxon_by_label[lbl]
-        best_group, best_dist = None, None
+        # nearest distance to EACH reference group (so ties are explicit)
+        min_prom, min_para = None, None
         for ref_lbl, group in ref_present.items():
-            ref_taxon = taxon_by_label[ref_lbl]
             try:
-                d = pdm.patristic_distance(cand_taxon, ref_taxon)
+                d = pdm.patristic_distance(cand_taxon, taxon_by_label[ref_lbl])
             except Exception:
                 continue
             if d is None:
                 continue
-            if best_dist is None or d < best_dist:
-                best_dist, best_group = d, group
-        if best_group == "Prometheus_ref":
+            if group == "Prometheus_ref":
+                if min_prom is None or d < min_prom:
+                    min_prom = d
+            elif group == "Paralog_ref":
+                if min_para is None or d < min_para:
+                    min_para = d
+        if min_prom is None and min_para is None:
+            assignments[lbl] = "Unplaced"
+        elif min_para is None or (min_prom is not None and min_prom < min_para):
             assignments[lbl] = "Prometheus"
-        elif best_group == "Paralog_ref":
+        elif min_prom is None or (min_para < min_prom):
             assignments[lbl] = "Paralog"
         else:
-            assignments[lbl] = "Unplaced"
+            assignments[lbl] = "Unplaced"  # exact tie -> cannot separate
     return assignments
 
 

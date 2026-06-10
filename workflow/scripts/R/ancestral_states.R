@@ -14,10 +14,13 @@
 #
 # Methanogen enrichment of gains: for each mapped history we count gains
 # that occur on branches leading into methanogen tips/clades (a branch is
-# "methanogen" if its child subtree is entirely methanogen). We compare
-# the observed mean gains-on-methanogen-branches to a null built by
-# permuting the methanogen labels across tips (>=200 permutations,
-# re-mapping each time) and report a one-sided enrichment p.
+# "methanogen" if its child subtree is entirely methanogen). We compare the
+# observed mean gains-on-methanogen-branches to a PHYLOGENETICALLY STRUCTURED
+# null: the methanogen trait is simulated on the same tree under an Mk model
+# fit to the observed states (>=200 sims), which preserves the clustering of
+# methanogeny. Free tip-label shuffling is NOT used (it destroys that
+# clustering and makes the test anticonservative); it remains only as a clearly
+# labelled last-resort fallback if the Mk fit fails. One-sided enrichment p.
 #
 # Output (SCHEMA evolution/ancestral/gains_losses.tsv): rows
 #   n_gains, n_losses, rate_gain, rate_loss, n_independent_acquisitions,
@@ -265,8 +268,19 @@ main <- function() {
     }
 
     # ---- methanogen enrichment of gains --------------------------- #
+    # Observed: gains landing on branches that lead into all-methanogen clades,
+    # averaged over the stochastic maps. The NULL must preserve the phylogenetic
+    # clustering of methanogeny -- methanogens sit in a few large clades, so free
+    # tip-label shuffling (the old approach) destroys that structure and makes the
+    # test anticonservative, exactly the non-independence problem the rest of the
+    # pipeline controls for. Instead we SIMULATE the methanogen trait on the SAME tree
+    # under an Mk model fit to the observed states, recompute methanogen branches per
+    # simulation, and rescore the FIXED gain maps. The gain placements are held fixed;
+    # only the methanogen-trait realisation is randomised, under a model that keeps its
+    # phylogenetic autocorrelation.
     enrichment_p <- NA_real_
     obs_meth_gains <- NA_real_; exp_meth_gains <- NA_real_
+    null_method <- "not_run"
     if (length(unique(mvec)) >= 2 && !anyNA(mvec)) {
       meth_named <- setNames(as.integer(mvec), tree$tip.label)
       meth_edges <- tryCatch(edge_into_methanogen(tree, meth_named),
@@ -274,23 +288,45 @@ main <- function() {
       obs_per_sim <- vapply(smaps, function(s) gains_on_meth(s, meth_edges), numeric(1))
       obs_meth_gains <- mean(obs_per_sim)
 
-      # Null: permute methanogen labels across tips, recompute meth_edges,
-      # and score the SAME mapped histories (so only the label assignment
-      # is randomised, holding the inferred gain placements fixed). >=200 perms.
       nperm <- max(200L, nsim)
-      null_means <- numeric(nperm)
-      for (p in seq_len(nperm)) {
-        permv <- sample(meth_named)
-        names(permv) <- tree$tip.label
+      meth_factor <- setNames(as.factor(meth_named), tree$tip.label)
+
+      # Simulate nperm methanogen histories under a fitted Mk model (ARD, then ER).
+      sim_mat <- NULL
+      for (mk_model in c("ARD", "ER")) {
+        sim_mat <- tryCatch({
+          fit_mk <- phytools::fitMk(tree, meth_factor, model = mk_model)
+          Qmat <- phytools::as.Qmatrix(fit_mk)
+          s <- phytools::sim.Mk(tree, Qmat, nsim = nperm)
+          if (is.null(dim(s)))
+            s <- matrix(as.character(s), ncol = 1, dimnames = list(names(s), NULL))
+          s[tree$tip.label, , drop = FALSE]
+        }, error = function(e) NULL)
+        if (!is.null(sim_mat)) { null_method <- sprintf("Mk_simulation(%s)", mk_model); break }
+      }
+
+      score_null <- function(state_vec) {
+        permv <- setNames(as.integer(as.character(state_vec) == "1"), tree$tip.label)
         me <- tryCatch(edge_into_methanogen(tree, permv),
                        error = function(e) rep(FALSE, nrow(tree$edge)))
-        # average over a small subset of sims for speed if nsim large
         idx <- if (length(smaps) > 50) sample(seq_along(smaps), 50) else seq_along(smaps)
-        null_means[p] <- mean(vapply(smaps[idx], function(s) gains_on_meth(s, me), numeric(1)))
+        mean(vapply(smaps[idx], function(s) gains_on_meth(s, me), numeric(1)))
       }
+
+      if (!is.null(sim_mat)) {
+        null_means <- vapply(seq_len(ncol(sim_mat)),
+                             function(j) score_null(sim_mat[, j]), numeric(1))
+      } else {
+        # Last-resort fallback (clearly labelled): the structured null could not be
+        # fit, so we revert to free tip-label permutation and FLAG it as weaker.
+        null_method <- "tip_label_permutation(FALLBACK: Mk null unavailable; anticonservative)"
+        null_means <- vapply(seq_len(nperm), function(p) score_null(sample(meth_named)),
+                             numeric(1))
+      }
+
       exp_meth_gains <- mean(null_means)
-      # one-sided: P(null >= observed)
-      enrichment_p <- (sum(null_means >= obs_meth_gains) + 1) / (nperm + 1)
+      # one-sided: P(null >= observed), with the standard +1 correction.
+      enrichment_p <- (sum(null_means >= obs_meth_gains) + 1) / (length(null_means) + 1)
     }
 
     n_indep <- mean_gains  # independent acquisitions = mean inferred gains
@@ -311,10 +347,10 @@ main <- function() {
            "observed mean gains on branches leading into methanogen clades"),
       mrow("expected_gains_methanogen",
            ifelse(is.na(exp_meth_gains), NA_real_, round(exp_meth_gains, 4)),
-           "null mean from permuting methanogen labels across tips"),
+           sprintf("null mean of gains on methanogen branches (%s)", null_method)),
       mrow("enrichment_p",
            ifelse(is.na(enrichment_p), NA_real_, signif(enrichment_p, 4)),
-           "one-sided P(null >= observed); >=200 label permutations")
+           sprintf("one-sided P(null >= observed); >=200 sims; null=%s (phylogenetically structured)", null_method))
     )
 
     dir.create(dirname(opt$out), showWarnings = FALSE, recursive = TRUE)

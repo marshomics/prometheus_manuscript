@@ -53,5 +53,7 @@ rule provenance:
             v=$(command -v $tool >/dev/null 2>&1 && ($tool --version 2>&1 | head -n1) || echo "not-on-PATH-here")
             echo "$tool=$v"
           done
+          # DefenseFinder models version (the Prometheus model needs models >= 2.0.0).
+          echo "defense-finder-models=$(command -v macsydata >/dev/null 2>&1 && (macsydata info defense-finder-models 2>/dev/null | grep -i -m1 version || echo unknown) || echo macsydata-not-on-PATH)"
         }} > {output}
         """

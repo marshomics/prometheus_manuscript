@@ -60,7 +60,7 @@ def main() -> None:
     ap.add_argument("--batch-dir", required=True)
     ap.add_argument("--id-col", default="genome_id")
     ap.add_argument("--gc-col", default="gc_avg")
-    ap.add_argument("--length-col", default="scaf_bp")
+    ap.add_argument("--length-col", default="contig_bp")  # matches config preprocess.bbmap.length_col
     ap.add_argument("--contigs-col", default="n_contigs")
     ap.add_argument("--n50-col", default="ctg_L50")  # BBMap ctg_L50 = N50 length (bp); ctg_N50 = L50 count
     ap.add_argument("--out", required=True)

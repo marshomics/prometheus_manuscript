@@ -37,7 +37,7 @@ MASTER_BACKBONE = [
     "completeness", "contamination", "quality_tier", "pass_primary", "genome_size",
     "mcrA", "n_mcr", "methanogen", "is_anme", "methanogenesis_subtype",
     "prometheus_present", "prometheus_tier", "prometheus_n_loci",
-    "detect_defensefinder", "n_defense_systems",
+    "detect_defensefinder", "n_defense_systems", "n_defense_systems_excl_prometheus",
 ]
 
 GTDB_RANKS = [
@@ -192,17 +192,37 @@ def load_prometheus(path: str) -> dict:
     return out
 
 
-def count_defense_systems(df_dir: str, genome: str) -> int:
-    """Data rows (minus header) in {df_dir}/{g}/{g}_defense_finder_systems.tsv."""
+def count_defense_systems(df_dir: str, genome: str):
+    """Return (n_total, n_excl_prometheus) DefenseFinder systems for a genome.
+
+    n_total       = all system rows in {g}_defense_finder_systems.tsv.
+    n_excl_prometheus = system rows whose `type` is NOT Prometheus. This is the
+    defensible "general defense load" covariate for the association models: the focal
+    system must not be counted inside the variable used to control for defense-richness
+    (otherwise the model conditions partly on its own response).
+    """
     f = os.path.join(df_dir, genome, f"{genome}_defense_finder_systems.tsv")
     if not os.path.exists(f):
-        return 0
+        return 0, 0
     try:
-        with open(f) as fh:
-            lines = [ln for ln in fh if ln.strip()]
-        return max(0, len(lines) - 1)  # minus header
+        df = pd.read_csv(f, sep="\t")
+        df.columns = [c.strip() for c in df.columns]
+        n_total = len(df)
+        if "type" in df.columns:
+            n_excl = int((~df["type"].astype(str).str.lower()
+                          .str.contains("prometheus", na=False)).sum())
+        else:
+            n_excl = n_total
+        return n_total, n_excl
     except Exception:
-        return 0
+        # fall back to a line count (cannot separate Prometheus -> treat all as "other")
+        try:
+            with open(f) as fh:
+                lines = [ln for ln in fh if ln.strip()]
+            n = max(0, len(lines) - 1)
+            return n, n
+        except Exception:
+            return 0, 0
 
 
 def load_ecology(path: str):
@@ -388,8 +408,8 @@ def main():
         # --- detection flags ---
         sens = sensitivity.get(gid, {"detect_defensefinder": 0})
 
-        # --- defense load ---
-        n_def = count_defense_systems(args.df_dir, gid)
+        # --- defense load (total, and excluding the focal Prometheus system) ---
+        n_def, n_def_excl = count_defense_systems(args.df_dir, gid)
 
         # --- ecology (species-level group_*/niche_* 0/1; absent genome -> 0) ---
         eco = ecology.get(gid, {})
@@ -420,6 +440,7 @@ def main():
             "prometheus_n_loci": prom["n_loci"],
             "detect_defensefinder": sens["detect_defensefinder"],
             "n_defense_systems": n_def,
+            "n_defense_systems_excl_prometheus": n_def_excl,
         }
         # left-join the ecology columns (missing -> 0)
         for c in eco_cols:

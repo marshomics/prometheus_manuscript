@@ -66,7 +66,7 @@ gtdb_domain, gtdb_phylum, gtdb_class, gtdb_order, gtdb_family, gtdb_genus, gtdb_
 completeness, contamination, quality_tier, pass_primary, genome_size,
 mcrA, n_mcr, methanogen, is_anme, methanogenesis_subtype,
 prometheus_present, prometheus_tier (best of A>B>C or ""), prometheus_n_loci,
-detect_defensefinder, n_defense_systems,
+detect_defensefinder, n_defense_systems, n_defense_systems_excl_prometheus,
 group_* and niche_* (0/1, one column per group/niche; species-level
 presence-absence from the metadata table, group_* sorted then niche_*; absent
 genome -> 0)
@@ -83,7 +83,9 @@ rank, taxon, n_genomes, n_present, prevalence, ci_low, ci_high, median_completen
 
 ## distribution/association_tests.tsv  (association_tests.R)
 test, model, term, estimate, std_error, statistic, p_value, ci_low, ci_high, n, note
-(rows: naive_glm, phyloglm_methanogen, phyloglm_methanogen+confounders, fitPagel, D_statistic)
+(rows: naive_glm, phyloglm_methanogen, phyloglm_confounders, fitPagel, D_statistic.
+The headline phyloglm_confounders model adjusts for completeness, scaled genome size,
+and defense load EXCLUDING the focal Prometheus system -- n_defense_systems_excl_prometheus.)
 
 ## distribution/cooccurrence.tsv  (cooccurrence.R)
 system_a (Prometheus), system_b, n_a, n_b, n_both, method, statistic, p_value, p_adj, direction
@@ -115,3 +117,8 @@ term per predictor; p_adj = BH across all reported terms.)
 
 ## synthesis/results_registry.tsv  (results_registry.py)
 family, test, term, estimate, ci_low, ci_high, p_value, p_adj, hypothesis {confirmatory,exploratory}
+(families: association, cooccurrence, ecology, selection, reconciliation, ancestral --
+EVERY test family, so the central BH-per-family FDR sees them all, including the
+methanogen-gain-enrichment p and the reconciliation transfer signal. hypothesis is set
+by (family, test, term): confirmatory = phyloglm methanogen [not the naive GLM baseline],
+RELAX, reconciliation transfer, and the ancestral methanogen-gain-enrichment test.)

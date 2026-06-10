@@ -13,10 +13,10 @@ predict R-loop-forming phage transcripts):
        <= ``window`` bp. The RIZ is where the stable G4 / G-rich duplex that seeds
        the R-loop forms.
   REZ  (R-loop Elongation Zone): a downstream G-rich stretch within ``rez_max_gap``
-       bp of the RIZ that supports elongation of the displaced loop. The REZ is
-       *supportive*: an RLFS is called on a qualifying RIZ; the REZ, when present
-       downstream, is recorded but is not strictly required (matching QmRLFS's
-       "RIZ with optional permissive REZ" permissive mode).
+       bp of the RIZ that supports elongation of the displaced loop. By default
+       (``--require-rez True``) a full RLFS REQUIRES both a RIZ and a downstream REZ
+       (QmRLFS-style), which makes the call specific rather than a bare G-cluster
+       detector. ``--require-rez False`` reverts to the permissive RIZ-only mode.
 
 Each sequence is scanned on BOTH strands (the minus strand is the
 reverse-complement), because an RLFS on either DNA strand can template an R-loop on
@@ -83,13 +83,19 @@ def has_downstream_rez(seq: str, from_pos: int) -> bool:
     return False
 
 
-def count_rlfs_one_strand(seq: str, min_g: int, window: int) -> int:
-    """Count non-overlapping RIZ-anchored RLFS on a single (already-cased) strand.
+def count_rlfs_one_strand(seq: str, min_g: int, window: int, require_rez: bool = True) -> int:
+    """Count non-overlapping RLFS on a single (already-cased) strand.
 
     A RIZ = >= RIZ_MIN_TRACTS G-tracts whose cluster spans <= `window` bp. We walk
     the G-tracts left to right; the first tract that, together with the next
-    (RIZ_MIN_TRACTS-1) tracts, fits inside `window` bp opens an RLFS. We then jump
-    past that cluster so RLFS do not overlap (each initiation zone counted once).
+    (RIZ_MIN_TRACTS-1) tracts, fits inside `window` bp opens a candidate RIZ. We then
+    jump past that cluster so calls do not overlap (each initiation zone counted once).
+
+    A full QmRLFS-style RLFS = RIZ + a downstream G-rich REZ. With require_rez=True
+    (default) a candidate RIZ is only counted as an RLFS when a permissive REZ is
+    found within REZ_MAX_GAP bp downstream (this is what the REZ machinery is FOR, and
+    it makes the call specific rather than a bare G-cluster detector). With
+    require_rez=False the detector reverts to the permissive RIZ-only mode.
     """
     tracts = find_g_tracts(seq, min_g)
     if len(tracts) < RIZ_MIN_TRACTS:
@@ -103,21 +109,24 @@ def count_rlfs_one_strand(seq: str, min_g: int, window: int) -> int:
         last_idx = i + RIZ_MIN_TRACTS - 1
         last_end = tracts[last_idx][1]
         if (last_end - first_start) <= window:
-            # qualifying RIZ; the optional permissive REZ is recorded but not required
-            _ = has_downstream_rez(seq, last_end)  # documented; informative only
-            n_rlfs += 1
-            # advance past this cluster to keep RLFS non-overlapping
-            i = last_idx + 1
+            # qualifying RIZ; require a downstream REZ for a full RLFS unless permissive
+            if (not require_rez) or has_downstream_rez(seq, last_end):
+                n_rlfs += 1
+                # advance past this cluster to keep RLFS non-overlapping
+                i = last_idx + 1
+            else:
+                # RIZ without a supporting REZ: not a full RLFS; step one tract on
+                i += 1
         else:
             i += 1
     return n_rlfs
 
 
-def count_rlfs(seq: str, min_g: int, window: int) -> int:
+def count_rlfs(seq: str, min_g: int, window: int, require_rez: bool = True) -> int:
     """Total RLFS on both strands of a sequence."""
     s = seq.upper().replace("U", "T")
-    plus = count_rlfs_one_strand(s, min_g, window)
-    minus = count_rlfs_one_strand(revcomp(s), min_g, window)
+    plus = count_rlfs_one_strand(s, min_g, window, require_rez)
+    minus = count_rlfs_one_strand(revcomp(s), min_g, window, require_rez)
     return plus + minus
 
 
@@ -127,10 +136,14 @@ def main():
     ap.add_argument("--genome", required=True)
     ap.add_argument("--riz-min-g", type=int, default=3)
     ap.add_argument("--window", type=int, default=100)
+    ap.add_argument("--require-rez", default="True",
+                    help="require a downstream G-rich REZ for a full RLFS call "
+                         "(QmRLFS-style; True) vs permissive RIZ-only (False)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+    require_rez = str(args.require_rez).strip().lower() in ("true", "1", "yes")
 
     records = list(utils.read_fasta(args.fasta))
     if not records:
@@ -143,7 +156,7 @@ def main():
         n_prone = 0
         for name, seq in records:
             length = len(seq)
-            n_rlfs = count_rlfs(seq, args.riz_min_g, args.window)
+            n_rlfs = count_rlfs(seq, args.riz_min_g, args.window, require_rez)
             prone = n_rlfs >= 1
             if prone:
                 n_prone += 1
@@ -152,8 +165,8 @@ def main():
             )
 
     utils.log(
-        f"{args.genome}: {len(records)} provirus(es), "
-        f"{n_prone} R-loop-prone (riz_min_g={args.riz_min_g}, window={args.window})"
+        f"{args.genome}: {len(records)} provirus(es), {n_prone} R-loop-prone "
+        f"(riz_min_g={args.riz_min_g}, window={args.window}, require_rez={require_rez})"
     )
 
 

@@ -169,6 +169,62 @@ stats:
   phyloglm_btol: 10
   phyloglm_boot: 200
 
+# ---- Bacterial cross-domain branch (OPT-IN; never touches the archaeal run) ----
+# A parallel branch that ingests pre-computed bacterial DefenseFinder output and
+# proteomes, validates bacterial Prometheus with the SAME scripts as archaea, then
+# adds the cross-domain analyses (phylogeny + transfer direction, matched prevalence/
+# architecture, cross-domain dN/dS, co-occurrence). Build it with the `crossdomain`
+# target; the default `snakemake` (archaeal) run is unaffected. Set enabled: true and
+# fill the paths below. Leave a path "" to skip the module that needs it.
+bacteria:
+  enabled: false                 # set true to build the bacterial/cross-domain branch
+  # --- detection inputs you already have (combined DF tables + per-genome faa) ---
+  df_systems: ""                 # combined DefenseFinder systems TSV (all bacterial genomes)
+  df_genes: ""                   # combined DefenseFinder genes TSV (all bacterial genomes)
+  faa_dir: ""                    # directory of per-genome {genome_id}.faa proteomes
+  cds_dir: ""                    # directory of per-genome {genome_id}.fna CDS (for cross-domain dN/dS)
+  # --- column names in the combined tables (case-insensitive; first match wins) ---
+  systems_genome_col: "genome_id"   # column in df_systems naming the genome
+  genes_genome_col: "genome_id"     # column in df_genes naming the genome
+  # --- metadata (you have GTDB taxonomy + completeness) ---
+  taxonomy: ""                   # TSV: genome_id + classification (GTDB d__..;s__..) or gtdb_* columns
+  qc: ""                         # TSV: genome_id, completeness[, contamination]
+  min_completeness: 90.0         # genomes below this are excluded from primary prevalence (you pre-filtered at 90)
+  # --- bacterial species tree for the phylogeny-controlled tests (co-occurrence/niche) ---
+  gtdb_bac_tree: ""              # GTDB bac120 reference tree (newick) to PRUNE to your genomes (defensible, tractable)
+  # --- OPTIONAL extras (modules below activate only when provided) ---
+  niche_metadata: ""             # TSV: genome_id + oxygen/biome/host labels -> activates the niche specificity control
+  genomes_dir: ""                # dir of bacterial genome ASSEMBLIES (contigs) -> activates provirus + R-loop mechanism test
+  genome_extension: "fasta"      # extension of the assemblies in genomes_dir ({genome_id}.<ext>)
+  system: "Prometheus"           # DefenseFinder system name to extract (matches type/subtype, incl. proA)
+
+# ---- Intrinsic disorder (OPT-IN; ProA/Prometheus IDR comparison) -------
+# Per-residue disorder is predicted by CONSENSUS of two independent methods and
+# compared across niches / lineages / domains-of-life in the same phylogeny-controlled
+# framework as the rest of the pipeline. Sequence-based prediction -> exploratory tier.
+# Restricted to intact, non-fragmented loci (truncation fakes disorder at broken ends),
+# low-complexity-aware (LCR is not disorder), alignment-anchored (compare HOMOLOGOUS
+# regions), and (optionally) normalised against host-proteome background disorder.
+disorder:
+  enabled: false                 # set true to build the disorder module (`disorder` target)
+  # --- consensus predictors (a residue is 'disordered' only where BOTH agree) ---
+  # metapredict is pip/conda-installable; IUPred3 is free for ACADEMIC use but
+  # license-gated (download + register), so it is staged by path. When iupred3_path is
+  # unset the module falls back to metapredict + alphaPredict (both installable) and
+  # LABELS the result as the weaker (correlated) consensus.
+  metapredict_threshold: 0.5     # metapredict disorder score >= this = disordered
+  iupred3_path: ""               # dir containing iupred3.py (gold-standard 2nd predictor); "" -> alphaPredict fallback
+  iupred3_mode: "long"           # IUPred3 long- vs short-disorder mode
+  iupred3_threshold: 0.5
+  alphapredict_plddt_cutoff: 50  # predicted pLDDT < this = disordered (fallback 2nd predictor)
+  min_idr_len: 12                # minimum consecutive consensus-disordered residues to call an IDR
+  # --- defensibility controls ---
+  intact_only: true              # restrict to catalog catalytic_status==intact & not fragmented
+  mask_low_complexity: true      # segmasker (BLAST+) low-complexity; report disorder excl. LCR
+  temperature_cols: []           # niche/group columns that proxy temperature -> covariate in niche tests
+  host_background: ""            # optional TSV (genome_id, background_frac_disordered) to normalise per-locus disorder
+  predictors_label: "metapredict+iupred3"   # recorded in provenance; auto-corrected to the fallback if used
+
 # ---- Plotting (publication-ready, Adobe-Illustrator-editable) ---------
 plotting:
   formats: ["png", "svg"]

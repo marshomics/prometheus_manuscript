@@ -13,6 +13,44 @@ four domains (DUF4011, DUF3320, DNA2 helicase/nuclease, REase MTES) that acts on
 phage transcription R-loops (van den Berg et al., *Cell Host & Microbe* 2024). In
 archaea it has only been detected, never tested; this pipeline characterizes it.
 
+## Scientific and computational plan
+
+The aim is to characterize Prometheus across archaea (how diverse it is, where it sits
+taxonomically and phylogenetically, how it evolves, and which traits and habitats it
+tracks) and to test whether it is associated with methanogens. Optional branches bring
+bacteria in as the baseline the archaeal findings are read against (origin and direction
+of transfer, a matched comparison, and a validation of the R-loop mechanism) and add a
+comparison of ProA intrinsic disorder.
+
+The workflow is a sequence of questions, each answered by a stage whose outputs feed the
+next. Phase 1 turns the raw genome set into quality-filtered, species-level
+representatives; Phase 2 runs the analysis on that set. The per-rule reference is §5; the
+table below maps each question to what the pipeline does and the results that answer it.
+
+| Scientific question | What the pipeline does | Results that answer it |
+|---|---|---|
+| Are the archaeal hits genuine Prometheus, not cellular DNA2 / NurA-HerA paralogs? | DefenseFinder detection, then validation by domain architecture, phylogenetic placement against Prometheus vs paralog references, defense-island context, and length/fragmentation; loci tiered A/B/C/Rejected | `prometheus_catalog.tsv`, `detection_sensitivity.tsv`, `prometheus_proteins.faa`, validation-tree + detection-funnel figures |
+| Where does it sit on the archaeal tree, and is it clade-restricted or scattered? | prevalence by GTDB rank with Wilson 95% CIs; the Fritz–Purvis D statistic for phylogenetic clumping | `prevalence_by_taxon.tsv`, prevalence-caterpillar figure, D term in `association_tests.tsv` |
+| How diverse is the system, in sequence and in architecture? | MMseqs2 subfamily clustering at graded identities; enumeration of domain architectures (losses, fusions, reorderings) | `subfamilies.tsv`, `architecture_typology.tsv`, subfamily + architecture figures |
+| Is it associated with methanogens, beyond phylogeny and confounders? | methanogens defined from genes (McrA, with ANME separated); phylogenetic logistic regression adjusted for completeness, genome size, and defense load excluding Prometheus; Pagel correlated-evolution test; a naive test kept only as a labelled baseline | `association_tests.tsv`, association-forest figure, `master_table.tsv` |
+| Does it co-occur with, or exclude, other defense systems? | correlated-evolution test (fitPagel) per system with a Fisher odds-ratio direction, BH-corrected | `cooccurrence.tsv`, co-occurrence odds-ratio + heatmap figures |
+| Is it vertically inherited or transferred, how many times was it acquired, and are gains enriched in methanogen lineages? | GeneRax DTL reconciliation (transfer fraction); stochastic mapping for independent acquisitions and gains/losses, with a phylogenetically structured methanogen-enrichment null; gene-tree vs species-tree tanglegram; per-domain trees + Robinson–Foulds for domain shuffling | `reconciliation_events.tsv`, `gains_losses.tsv`, `rf_distances.tsv`, tanglegram / ancestral / gain-enrichment figures |
+| Is it under diversifying selection, and on which domains? | HyPhy FEL/MEME/BUSTED/aBSREL/RELAX on catalytically-intact loci, with RELAX contrasting methanogen branches | `selection_summary.tsv`, `site_table.tsv`, dN/dS-along-protein + selection-by-domain figures |
+| Does it track environment and viral pressure / R-loops? | environment and niche phylogenetic regression (temperature-aware); geNomad proviruses and the QmRLFS R-loop-prone fraction tested against presence, completeness- and size-adjusted | `ecology_associations.tsv`, `viral_summary.tsv`, ecology + viral/R-loop figures |
+| Which results are confirmatory, and do they survive one multiple-testing regime? | every test collected, BH-corrected per family, tagged confirmatory vs exploratory; an annotated species tree | `results_registry.tsv`, `master_tree`, `summary_forest` |
+| (opt-in) Where did the archaeal copies come from, and how do they compare with bacteria? | cross-domain phylogeny with a topology-based transfer direction and independent-acquisition count; matched prevalence and architecture; cross-domain dN/dS and co-occurrence | `crossdomain_summary.tsv`, bacterial catalog/prevalence/typology, cross-domain figures |
+| (opt-in) Does the R-loop mechanism hold in the domain where it was demonstrated? | geNomad/CheckV/R-loop on bacterial assemblies; bacterial Prometheus vs proviral R-loop load, phylogeny-controlled | `bacterial_viral_associations.tsv`, `viral_rloop_crossdomain` figure |
+| (opt-in) Do ProA disordered regions vary across niches, lineages, and domains? | consensus disorder (two independent predictors) on intact loci, low-complexity-aware, alignment-anchored, compared with phylolm | disorder tables + along-protein / by-group figures |
+
+Two choices run through every row. Absence is modeled, not assumed: genome completeness,
+a detection-sensitivity flag, genome size, and defense load all enter as covariates, so a
+missing call is treated as possible non-detection rather than confirmed absence. And
+every association is phylogenetically controlled, because methanogens are polyphyletic
+and habitat tracks clade in archaea; the naive contingency result is reported only as a
+labelled baseline. The conventions that make each step defensible (genome set,
+methanogen-from-genes, single-detector validation, rooting, one FDR regime) are listed
+in §4.
+
 ## Layout
 
 ```
@@ -373,6 +411,26 @@ ecology/plots/ecology_enrichment, viral_rloop_association
 synthesis/figures/master_tree, summary_forest
 ```
 
+Extra figures (`rules/plots_extra.smk` + the cross-domain rule; added alongside the
+above, same PNG+SVG editable-text convention). Each shows effect size AND uncertainty
+AND sample size, and degrades to a labelled placeholder on empty input:
+
+```
+qc/plots/prometheus_covariates                 size/defense-load/completeness by presence (the confound the model adjusts for)
+distribution/plots/prevalence_caterpillar      prevalence ± Wilson CI by clade; CI vs overall flags enriched/depleted
+distribution/plots/cooccurrence_oddsratio      directional log2 OR per system + BH significance
+diversity/plots/architecture_combinations      UpSet of which domains co-occur, and how many loci
+diversity/plots/architecture_by_phylum         architecture × phylum count heatmap
+diversity/plots/subfamily_identity_curve       subfamily count vs clustering identity + rank-abundance
+ecology/plots/viral_pressure_prometheus        proviral / R-loop load by presence + prevalence vs R-loop-pressure (Wilson CI)
+ecology/plots/niche_effect_forest              phyloglm environment effects ± CI, BH-coloured
+ecology/plots/prevalence_niche_phylum          prevalence bubble grid (niche × phylum): habitat vs clade
+evolution/plots/dnds_along_protein             per-site dN/dS along the alignment + domain track (conflict signature)
+evolution/plots/reconciliation_events          D/T/L/S counts per tool + vertical fraction
+evolution/plots/gain_enrichment_null           methanogen-gain enrichment: structured null + observed + p
+crossdomain/figures/crossdomain_comparison     bacteria vs archaea: prevalence (Wilson CI) + domain-architecture fractions
+```
+
 ### Editing figures in Adobe Illustrator
 
 The SVGs keep **text as editable `<text>`** (matplotlib `svg.fonttype='none'`;
@@ -401,3 +459,147 @@ TrueType as Type 42 in PDF.)
 - A full robustness/accuracy audit (tool-format verification against docs,
   synthetic runtime tests of the Python steps, statistical review, and the bugs
   fixed) is documented in [`AUDIT.md`](AUDIT.md).
+
+## 8. Bacterial / cross-domain branch (opt-in)
+
+Prometheus was characterised in bacteria (van den Berg 2024); the archaeal pipeline
+is the extension. This branch brings bacteria in as the baseline the archaeal numbers
+are read against. It's **opt-in and additive**: it never changes the archaeal
+`all`/`preprocess` runs, it only consumes the archaeal Prometheus proteins and CDS as
+read-only inputs. Build it with the `crossdomain` target after setting `bacteria:` in
+`config/config.yaml`.
+
+You supply pre-computed bacterial DefenseFinder output (combined systems + genes
+tables), per-genome `.faa` (and `.fna` CDS), GTDB taxonomy, and completeness. The
+branch then:
+
+- **Validates bacterial Prometheus with the SAME scripts as archaea.**
+  `extract_bacterial_prometheus.py` splits the combined systems table into the
+  per-genome layout the pipeline already understands, so `validate_prometheus.py`,
+  `build_defense_matrix.py`, `compute_prevalence.py`, `architecture_typology.py` and
+  `cooccurrence.R` are reused unchanged. Bacterial loci are tiered A/B/C exactly as
+  archaeal ones.
+- **Builds the cross-domain phylogeny** (archaeal + bacterial validated Prometheus +
+  the Pseudomonas reference + DNA2/NurA-HerA outgroup) and answers the question the
+  archaea-only design can't: where the archaeal copies came from.
+  `crossdomain_analysis.py` reports, from topology alone (no DTL model — a single
+  rooted species tree spanning both domains is contested), the minimum number of
+  cross-domain transitions (Fitch on the paralog-rooted ingroup), whether the archaeal
+  sequences are monophyletic, the count of independent archaeal acquisitions, and a
+  polarity call (bacteria→archaea when the ingroup root is bacterial and the archaeal
+  clades are derived/nested).
+- **Compares prevalence and architecture** across domains, runs cross-domain dN/dS
+  (FEL/MEME/BUSTED/aBSREL on the codon alignment; no methanogen RELAX partition across
+  domains; per-domain homology caveats apply), and tests co-occurrence against the
+  GTDB-bac120 reference tree pruned to your genomes.
+
+Matched sampling is your call: bacterial GTDB dwarfs archaeal, so report prevalence
+side-by-side and use species representatives with comparable QC rather than pooling.
+
+Two further modules activate only when you supply the extra data. The
+**anaerobe/niche specificity control** (`bacteria.niche_metadata`) is a clean control,
+since bacteria can't be methanogens, for whether the archaeal methanogen signal is
+partly a niche effect. The bacterial **provirus / R-loop mechanism test** turns on when
+you point `bacteria.genomes_dir` at the bacterial assemblies (and set
+`bacteria.genome_extension`): it runs geNomad → CheckV → the QmRLFS R-loop detector →
+aggregation on each assembly (reusing the archaeal scripts unchanged), then tests
+bacterial Prometheus presence against proviral load and R-loop-prone fraction in the
+same phylogeny-controlled, completeness/size-adjusted `phyloglm` framework. This matters
+because R-loop targeting was demonstrated in a bacterium (Pseudomonas), so reproducing
+the signal in bacteria validates the proxy the archaeal side leans on. The
+`viral_rloop_crossdomain` figure shows the R-loop-prone fraction by presence in both
+domains and the prevalence-vs-R-loop-pressure dose-response (Wilson CIs) side by side.
+The phylogeny-controlled test needs the bacterial species tree, so set
+`bacteria.gtdb_bac_tree` too; without it you still get the descriptive figure and the
+per-genome viral summary.
+
+```bash
+# after editing config: bacteria.enabled: true + paths
+snakemake crossdomain -n                                            # check the cross-domain DAG
+snakemake crossdomain --workflow-profile workflow/profiles/sge --use-conda --jobs 200
+```
+
+## 9. Intrinsic-disorder module (opt-in)
+
+Large multidomain proteins like ProA carry disordered linkers and tails, and that
+disorder can vary across niches and lineages. This module predicts it and compares it
+in the same phylogeny-controlled framework as everything else. It's **opt-in**
+(`disorder.enabled: true`, `disorder` target) and reuses the archaeal validated
+proteins, catalog, family alignment, and species tree read-only; the default run is
+untouched.
+
+Disorder is called by **consensus of two independent methods** — a residue counts as
+disordered only where both agree. metapredict (deep-learning) is always one; the second
+is IUPred3 (biophysical, genuinely independent) when you stage it
+(`disorder.iupred3_path`), otherwise alphaPredict (predicted pLDDT), which installs
+freely but is more correlated with metapredict and is labelled as the weaker fallback.
+IUPred3 is free for academic use but license-gated, so you download it once and point
+the config at it; the recommended consensus is metapredict + IUPred3.
+
+The controls that keep it defensible are baked in: it scores **intact, non-fragmented
+loci only** (truncation fakes disorder at broken ends), reports disorder **excluding
+low-complexity** regions (segmasker; LCR isn't disorder), and anchors disorder to the
+**family alignment** so lineages are compared on homologous positions rather than by raw
+whole-protein percentage. Comparisons use `phylolm` (Pagel's λ) on the species tree;
+because disordered content tracks growth temperature, any columns you list in
+`disorder.temperature_cols` are added as covariates to the niche tests. An optional
+host-proteome background (`disorder.host_background`, a `genome_id, background_frac`
+table) normalises each locus so the metric is "unusually disordered for its host," not
+lineage baseline. All disorder results enter the registry tagged **exploratory** —
+sequence prediction, not experiment.
+
+Outputs: `disorder/disorder_per_locus.tsv` (IDR count/length, disorder fractions),
+`disorder/disorder_by_column.tsv` (per-alignment-column disorder + domain), and figures
+`disorder_along_protein` (with the domain track — disorder should pile up in linkers),
+`disorder_by_group` (methanogen, and bacteria-vs-archaea when the bacterial branch is
+on), and `disorder_linker_vs_domain`.
+
+```bash
+# stage IUPred3 (recommended) and set disorder.enabled: true + disorder.iupred3_path
+snakemake disorder -n
+snakemake disorder --workflow-profile workflow/profiles/sge --use-conda --jobs 200
+```
+
+## 10. Synthesis: what the results show, together
+
+Three outputs pull the per-stage results into one picture. `master_table.tsv` carries
+one row per genome (QC, taxonomy, species-tree tip, gene-based methanogen status,
+Prometheus presence and tier, total and Prometheus-excluded defense load, and the
+species-level niche columns), so every downstream test draws from the same backbone.
+`results_registry.tsv` collects every test across families, applies one
+Benjamini–Hochberg regime per family, and tags each result confirmatory or exploratory.
+The `master_tree` figure paints presence and tier, methanogen and ANME status, ecology,
+and proviral / R-loop load onto the rooted species tree, so the distribution and its
+correlates are read in phylogenetic context rather than as a list.
+
+Read together, they support a layered account. First, a confidence-tiered catalog of
+genuine archaeal Prometheus, separated from the cellular DNA2 / NurA-HerA enzymes it
+resembles. Second, its distribution: which lineages carry it, how clumped it is, and how
+much its domain architecture varies. Third, the methanogen question, answered not by one
+test but by agreement across the confounder-adjusted phylogenetic regression, the Pagel
+correlated-evolution test, and the gains-on-methanogen-branches enrichment, three
+independent angles held to one central FDR. Fourth, its evolutionary mode: the balance of
+vertical inheritance against transfer, the number of independent acquisitions, and
+whether the nuclease and REase domains carry the diversifying-selection signature
+expected of a protein locked in conflict with phages. Fifth, its ecology: whether
+presence tracks viral pressure and R-loop-prone proviruses, the prediction that follows
+from the characterized mechanism.
+
+With the bacterial branch on, two further layers join. The cross-domain phylogeny places
+the archaeal sequences among bacterial Prometheus and polarizes the direction of
+transfer (the expected reading being a bacterial origin with one or more acquisitions
+into archaea), while the matched comparison asks whether archaeal Prometheus is rarer or
+architecturally reduced relative to the experimentally characterized bacterial form. The
+bacterial provirus/R-loop test re-runs the ecological prediction in the domain where the
+mechanism was shown, so a positive result there validates the R-loop proxy the archaeal
+side relies on. The disorder module, if run, adds where ProA carries intrinsic disorder
+and whether that varies across niches and lineages.
+
+The throughline is that no claim rests on a single number. Detection sensitivity and
+absence are modeled, every association is phylogenetically controlled, confounders enter
+explicitly rather than by assumption, and the confirmatory hypotheses are each
+triangulated across independent methods and corrected together. What the pipeline is
+built to deliver is a defensible, evolutionarily framed account of an anti-phage system
+only recently recognized in archaea: what it is, where it lives, how it evolves, what it
+travels with, and (with the optional branches) where it came from and whether its
+mechanism generalizes beyond the bacterium in which it was found.

@@ -39,3 +39,26 @@ Pfam accessions drift between releases (e.g. DUF4011 = PF13195). The pipeline
 detects domains by **name** from InterProScan/Pfam output by default and treats
 accessions as optional hints in `config: prometheus.domains`. Verify any accession
 you rely on against your installed Pfam release.
+
+## Bacterial / cross-domain branch (`config: bacteria`, opt-in)
+Stage your pre-computed bacterial inputs and point `bacteria:` at them (the archaeal
+run ignores all of this unless `bacteria.enabled: true`):
+| Key | What |
+|---|---|
+| `df_systems`, `df_genes` | combined bacterial DefenseFinder systems + genes tables (a genome_id column each) |
+| `faa_dir`, `cds_dir` | per-genome `{genome_id}.faa` proteomes and `{genome_id}.fna` CDS |
+| `taxonomy`, `qc` | GTDB classification + completeness per bacterial genome |
+| `gtdb_bac_tree` | GTDB **bac120** reference tree (newick), pruned to your genomes for the co-occurrence/niche tests |
+| `niche_metadata` (optional) | oxygen/biome/host labels — activates the anaerobe/niche specificity control |
+| `genomes_dir` + `genome_extension` (optional) | directory of bacterial **assemblies** (`{genome_id}.<ext>`) — activates the provirus/R-loop mechanism test (geNomad + CheckV + R-loop on each assembly). Needs the `genomad`/`checkv` DBs (config `db`) and, for the phylogeny-controlled test, `gtdb_bac_tree`. |
+The reused `prometheus_reference.faa` + `paralog_reference.faa` also anchor the
+cross-domain tree, so the same references serve both domains.
+
+## Intrinsic-disorder module (`config: disorder`, opt-in)
+metapredict and alphaPredict install automatically (`workflow/envs/disorder.yaml`), and
+segmasker comes with BLAST+. The gold-standard second predictor, **IUPred3**, is free
+for academic use but license-gated, so it is NOT installable here — download it once
+(register at the IUPred site), unpack it, and set `disorder.iupred3_path` to the folder
+containing `iupred3.py`/`iupred3_lib.py`. With that set, the consensus is
+metapredict + IUPred3 (two independent methods); without it the module falls back to
+metapredict + alphaPredict and labels the result as the weaker (correlated) consensus.

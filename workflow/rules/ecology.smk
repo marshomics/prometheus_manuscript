@@ -66,6 +66,7 @@ rule rloop_predict:
     params:
         riz_min_g=cfg("ecology/rloop/riz_min_g", 3),
         window=cfg("ecology/rloop/window", 100),
+        require_rez=str(cfg("ecology/rloop/require_rez", True)),
     conda:
         "../envs/plotting.yaml"
     threads: T_SMALL
@@ -75,7 +76,8 @@ rule rloop_predict:
         r"""
         python workflow/scripts/py/rloop_predict.py \
             --fasta {input.virus_fna} --genome {wildcards.genome} \
-            --riz-min-g {params.riz_min_g} --window {params.window} --out {output.rloop}
+            --riz-min-g {params.riz_min_g} --window {params.window} \
+            --require-rez {params.require_rez} --out {output.rloop}
         """
 
 

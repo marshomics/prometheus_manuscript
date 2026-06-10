@@ -219,6 +219,7 @@ rule selection:
         methods=",".join(SELECTION_METHODS),
         relax_partition=cfg("evolution/selection/relax_partition", "methanogen"),
         intact_only=str(cfg("evolution/selection/intact_only", True)),
+        site_pvalue=cfg("evolution/selection/site_pvalue", 0.1),
         domains_json=lambda wc: json_domains(),
         workdir=f"{RESULTS}/evolution/selection",
     log:
@@ -235,7 +236,7 @@ rule selection:
             --codon {input.codon} --gene-tree {input.gene_tree} --catalog {input.catalog} \
             --master {input.master} --domtbl {input.domtbl} --domains '{params.domains_json}' \
             --methods {params.methods} --relax-partition {params.relax_partition} \
-            --intact-only {params.intact_only} --run {params.run} \
+            --intact-only {params.intact_only} --site-pvalue {params.site_pvalue} --run {params.run} \
             --threads {threads} --workdir {params.workdir} \
             --out-summary {output.summary} --out-sites {output.sites} > {log} 2>&1
         """

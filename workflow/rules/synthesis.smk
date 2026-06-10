@@ -56,13 +56,16 @@ rule master_tree_figure:
 
 
 rule results_registry:
-    """Collect every hypothesis test; apply one FDR regime per family; mark confirmatory vs exploratory."""
+    """Collect EVERY hypothesis test (association, co-occurrence, ecology, selection,
+    reconciliation, ancestral); apply one BH FDR regime per family; mark confirmatory
+    vs exploratory by (family, test, term)."""
     input:
         association=rules.association_tests.output.tests,
         cooccurrence=rules.cooccurrence.output.cooc,
         ecology=rules.ecology_stats.output.assoc,
         selection=rules.selection.output.summary,
-        prevalence=rules.compute_prevalence.output.prevalence,
+        reconciliation=rules.reconciliation.output.events,
+        ancestral=rules.ancestral_states.output.gl,
     output:
         registry=f"{RESULTS}/synthesis/results_registry.tsv",
     params:
@@ -77,7 +80,8 @@ rule results_registry:
         mkdir -p $(dirname {output.registry})
         python workflow/scripts/py/results_registry.py \
             --association {input.association} --cooccurrence {input.cooccurrence} \
-            --ecology {input.ecology} --selection {input.selection} --prevalence {input.prevalence} \
+            --ecology {input.ecology} --selection {input.selection} \
+            --reconciliation {input.reconciliation} --ancestral {input.ancestral} \
             --fdr {params.fdr} --out {output.registry}
         """
 

@@ -5,10 +5,42 @@
 # from cellular paralogs -> defense-island context -> confidence tiers.
 # =====================================================================
 
+rule defensefinder_check:
+    """Preflight: fail fast unless the detector can actually call Prometheus.
+
+    Prometheus only exists in defense-finder-models v2.0.0+ (needs software >= 2.0.0);
+    an older binary or model set detects zero Prometheus loci silently. This gate must
+    pass before any genome is searched."""
+    output:
+        ok=f"{RESULTS}/defense/.defensefinder_ok",
+    params:
+        run=str(RUN_DEFENSEFINDER),
+        system=cfg("prometheus/defensefinder_system", "Prometheus"),
+        min_sw=cfg("prometheus/defensefinder_min_software", "2.0.0"),
+        models_version=cfg("prometheus/defensefinder_models_version", "2.0.0"),
+        provided=cfg("prometheus/defensefinder_provided_dir", "resources/defensefinder"),
+    log:
+        f"{LOGS}/defensefinder/preflight.log",
+    conda:
+        "../envs/defensefinder.yaml"
+    threads: T_SMALL
+    resources:
+        mem_mb=2000, runtime=20,
+    shell:
+        r"""
+        mkdir -p $(dirname {output.ok})
+        python workflow/scripts/py/check_defensefinder.py \
+            --run {params.run} --system {params.system} \
+            --min-software {params.min_sw} --models-version {params.models_version} \
+            --provided-dir {params.provided} --out {output.ok} > {log} 2>&1
+        """
+
+
 rule defensefinder:
     """Run (or ingest) DefenseFinder per genome under a pinned version."""
     input:
         faa=f"{RESULTS}/genes/{{genome}}/{{genome}}.faa",
+        models_ok=rules.defensefinder_check.output.ok,
     output:
         systems=f"{RESULTS}/defense/defensefinder/{{genome}}/{{genome}}_defense_finder_systems.tsv",
         genes=f"{RESULTS}/defense/defensefinder/{{genome}}/{{genome}}_defense_finder_genes.tsv",
@@ -75,6 +107,7 @@ rule assemble_candidates:
     params:
         system=cfg("prometheus/defensefinder_system", "Prometheus"),
         df_dir=f"{RESULTS}/defense/defensefinder",
+        strict=str(cfg("prometheus/strict_detection", True)),
     conda:
         "../envs/annotation.yaml"
     threads: T_SMALL
@@ -84,7 +117,7 @@ rule assemble_candidates:
         r"""
         python workflow/scripts/py/parse_defensefinder.py \
             --df-dir {params.df_dir} --proteome {input.proteome} --pmap {input.pmap} \
-            --system {params.system} \
+            --system {params.system} --strict {params.strict} \
             --out-candidates {output.candidates} --out-sources {output.sources} --out-raw {output.raw}
         """
 

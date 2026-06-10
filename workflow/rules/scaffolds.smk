@@ -108,6 +108,8 @@ rule mcr_search:
         hits=f"{RESULTS}/scaffolds/metabolism/mcr_hits.tsv",
     params:
         hmmdir=cfg("refs/mcr_hmm_dir", "resources/refs/mcr_hmm"),
+        score_fraction=cfg("methanogen/kofam_score_fraction", 0.5),
+        ko_list=cfg("db/kofam_ko_list", ""),
     log:
         f"{LOGS}/scaffolds/mcr_search.log",
     conda:
@@ -120,6 +122,7 @@ rule mcr_search:
         mkdir -p $(dirname {output.hits})
         python workflow/scripts/py/mcr_search.py \
             --proteome {input.proteome} --pmap {input.pmap} --hmmdir {params.hmmdir} \
+            --score-fraction {params.score_fraction} --ko-list "{params.ko_list}" \
             --threads {threads} --out {output.hits} > {log} 2>&1
         """
 

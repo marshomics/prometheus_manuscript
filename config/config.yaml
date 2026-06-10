@@ -86,6 +86,12 @@ prometheus:
   run_defensefinder: true              # run DefenseFinder under a pinned version (false = ingest provided outputs)
   defensefinder_provided_dir: "resources/defensefinder"   # used only when run_defensefinder: false
   defensefinder_system: "Prometheus"   # system name to extract from DefenseFinder output
+  # Prometheus first appears in defense-finder-models v2.0.0 (verified against the
+  # model registry's Release_updates.tsv). Pin the models version and require the
+  # matching software (>= 2.0.0); the defensefinder_check rule fails fast otherwise.
+  defensefinder_models_version: "2.0.0"   # minimum models version that contains Prometheus
+  defensefinder_min_software: "2.0.0"     # minimum defense-finder software version
+  strict_detection: true               # FAIL (not silent) if DefenseFinder returns zero systems of ANY type
   min_len_aa: 800                      # length sanity bounds (canonical ~2221 aa)
   max_len_aa: 3000
   # Domain architecture is detected by NAME from InterProScan/Pfam output
@@ -141,8 +147,9 @@ evolution:
   selection:
     run: true
     methods: ["FEL", "MEME", "BUSTED", "aBSREL", "RELAX"]
-    relax_partition: "methanogen"   # RELAX test set = methanogen branches
+    relax_partition: "methanogen"   # RELAX test set = terminal methanogen branches
     intact_only: true               # restrict dN/dS to catalytically-intact loci
+    site_pvalue: 0.1                 # FEL/MEME per-site significance threshold (exploratory)
 
 # ---- Ecology ----------------------------------------------------------
 ecology:
@@ -152,6 +159,8 @@ ecology:
     riz_min_g: 3       # RLFS RIZ: runs of >=3 G
     window: 100        # scan window (bp)
     min_rlfs_score: 1  # minimum RLFS hits to call a provirus "R-loop-prone"
+    require_rez: true  # QmRLFS-style: a full RLFS needs RIZ + a downstream G-rich REZ
+                       # (false = permissive RIZ-only G-cluster mode)
 
 # ---- Statistics -------------------------------------------------------
 stats:

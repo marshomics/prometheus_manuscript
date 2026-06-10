@@ -163,15 +163,21 @@ records it here:
 - **Detection is DefenseFinder-only** (no PADLOC, no custom HMM sweep), then
   curated. DefenseFinder already applies its mandatory-gene architecture rule
   before calling Prometheus; nothing is counted before the validation below.
+  Prometheus only exists in **defense-finder-models v2.0.0+**, which needs the
+  **software at ≥ 2.0.0** (an older binary detects zero Prometheus loci silently);
+  the env pins this and a `defensefinder_check` preflight rule fails fast unless the
+  detector can actually call Prometheus. `prometheus.strict_detection` additionally
+  fails the run if DefenseFinder emits zero systems of any type over a non-empty input.
 - **Validation separates Prometheus from housekeeping DNA2/NurA-HerA** by domain
   architecture, a catalytic-domain proxy, defense-island context, and phylogenetic
   placement against references. Candidates that place with cellular paralogs are
   rejected. Loci are tiered A/B/C; primary analyses use tier A, with A+B as a
   sensitivity check (`stats.confidence_tiers_primary`).
 - **Absence is modeled, not assumed.** Genome completeness, a detection-sensitivity
-  flag, genome size, and total defense-system count enter the association models as
-  covariates. The headline methanogen estimate is the phylogenetic-logistic term
-  *after* this conditioning.
+  flag, genome size, and defense-system count (**excluding the focal Prometheus
+  system**, so the model never conditions on its own response) enter the association
+  models as covariates. The headline methanogen estimate is the phylogenetic-logistic
+  term *after* this conditioning.
 - **Every association is phylogenetically controlled** (`phyloglm`, Pagel's
   correlated-evolution test, the D statistic; co-occurrence via `fitPagel`). The
   naive contingency-table result is reported only as a labelled baseline.
@@ -184,13 +190,19 @@ records it here:
   Set an outgroup appropriate to your genome set; midpoint is a heuristic, not a
   defensible default for rate-variable archaeal trees.
 - **Vertical inheritance is never assumed** — it's an outcome of GeneRax
-  reconciliation (ALE optional). Gains/losses come from stochastic mapping with a
-  methanogen-enrichment permutation test.
+  reconciliation (ALE optional). Gains/losses come from stochastic mapping; the
+  methanogen-enrichment test uses a *phylogenetically structured* null (the methanogen
+  trait is simulated on the tree under a fitted Mk model, preserving its clustering),
+  not free tip-label shuffling.
 - **dN/dS is restricted to catalytically-intact loci** so pseudogene relaxation
   can't masquerade as signal; RELAX tests whether selection intensity differs on
   methanogen branches.
 - **One FDR regime** (Benjamini-Hochberg, per test family) is applied centrally in
-  the results registry, which also tags confirmatory vs exploratory tests.
+  the results registry over **every** test family — association, co-occurrence,
+  ecology, selection, reconciliation, and ancestral (so the methanogen-gain-enrichment
+  p and the transfer signal are corrected too). Confirmatory vs exploratory is tagged
+  by (family, test, term): the phylogenetic methanogen tests (not the naive baseline),
+  RELAX, transfer, and the gain-enrichment test are confirmatory.
 
 Change any of these in `config/config.yaml`; the schema is validated at start.
 

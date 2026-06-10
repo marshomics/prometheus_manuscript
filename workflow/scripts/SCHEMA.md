@@ -115,6 +115,76 @@ predictor, level, model, estimate, std_error, p_value, p_adj, n, note
 continuous viral predictor {n_proviruses, frac_rloop_proviruses}; one phyloglm
 term per predictor; p_adj = BH across all reported terms.)
 
+## --- Bacterial / cross-domain branch (opt-in; bacteria.enabled: true) ---------
+
+## bacteria/prometheus/bacterial_prometheus_catalog.tsv  (validate_prometheus.py, reused)
+Same columns as prometheus_catalog.tsv, for bacterial loci ingested from the provided
+DefenseFinder set. bacteria/defense/{g}/{g}_defense_finder_systems.tsv are split out of
+the combined systems table by extract_bacterial_prometheus.py so the archaeal validate /
+defense-matrix scripts run unchanged on bacteria.
+
+## bacteria/bacterial_master_table.tsv  (build_bacterial_table.py)
+genome_id, tree_tip, gtdb_domain..gtdb_species, completeness, contamination, pass_primary,
+prometheus_present, prometheus_tier, prometheus_n_loci, n_defense_systems,
+n_defense_systems_excl_prometheus. Slim master so compute_prevalence.py and cooccurrence.R
+are reused as-is.
+
+## bacteria/distribution/bacterial_prevalence_by_taxon.tsv  (compute_prevalence.py, reused)
+Same columns as the archaeal prevalence table, for bacteria (report side-by-side; matched
+sampling is the user's responsibility -- bacterial GTDB dwarfs archaeal).
+
+## crossdomain/crossdomain_summary.tsv  (crossdomain_analysis.py)
+metric, value, note. metrics: n_archaeal_tips, n_bacterial_tips, n_crossdomain_transitions
+(Fitch minimum Bacteria<->Archaea changes on the paralog-rooted ingroup), n_archaeal_clades
+(= independent archaeal acquisitions), archaeal_monophyletic, ingroup_root_state,
+inferred_direction {bacteria->archaea | ambiguous | ...}. Topology-based (no DTL), a
+robustness-oriented complement to within-domain reconciliation.
+
+## crossdomain/selection/crossdomain_selection_summary.tsv  (run_selection.py, reused)
+Same columns as the archaeal selection summary; FEL/MEME/BUSTED/aBSREL on the cross-domain
+codon alignment (no methanogen RELAX partition across domains). intact-only; per-domain
+homology caveats apply (deep cross-domain MSA).
+
+## bacteria/distribution/bacterial_cooccurrence.tsv  (cooccurrence.R, reused)
+Same columns as the archaeal cooccurrence table, on the bacterial defense matrix + the
+GTDB-bac120 tree pruned to the bacterial genomes.
+
+## bacteria/ecology/viral/bacterial_viral_summary.tsv  (aggregate_viral.py, reused)
+Same columns as the archaeal viral_summary (genome_id, n_proviruses, total_provirus_kb,
+mean_checkv_completeness, n_rloop_proviruses, frac_rloop_proviruses), from geNomad +
+CheckV + the R-loop detector run on the provided bacterial assemblies
+(bacteria.genomes_dir). bacterial_master_table.tsv gains a genome_size column (from the
+QC length field or streamed from the assemblies) so the viral confound adjustment works.
+
+## bacteria/ecology/bacterial_viral_associations.tsv  (ecology_stats.R, reused)
+Same columns as ecology_associations.tsv; bacterial Prometheus presence vs the continuous
+viral predictors (n_proviruses, frac_rloop_proviruses), phylogeny-controlled on the
+bacterial species tree and adjusted for completeness + genome size. The
+viral_rloop_crossdomain figure visualises the mechanism across both domains.
+
+## --- Intrinsic-disorder module (opt-in; disorder.enabled: true) ---------------
+
+## disorder/disorder_per_locus.tsv  (predict_disorder.py)
+locus_id, genome_id, length_aa, intact, predictors {metapredict+iupred3 | metapredict+alphapredict | metapredict_only},
+frac_disordered (consensus), frac_disordered_metapredict, frac_disordered_second,
+n_idrs, longest_idr, frac_in_idrs, frac_lcr, frac_disordered_nonlcr (consensus disorder
+excluding low-complexity -- the preferred comparative metric), disorder_minus_background
+(frac_disordered - host background, when a background table is given). Intact, non-
+fragmented loci only by default.
+
+## disorder/disorder_per_residue.tsv  (predict_disorder.py)
+locus_id, position (1-based), meta_score, second_score, consensus {0,1}, lcr {0,1}
+
+## disorder/disorder_by_column.tsv  (map_disorder_to_alignment.py)
+alignment_col, n_loci, mean_disorder, frac_loci_disordered, domain (from the reference
+locus' domtbl; NA = linker/tail)
+
+## disorder/disorder_associations.tsv  (disorder_stats.R)
+predictor, level, model, estimate, std_error, p_value, p_adj, n, note. phylolm (Pagel
+lambda) of per-genome consensus disorder on methanogen status and each niche (with
+configured temperature columns as covariates). EXPLORATORY (sequence-predicted); enters
+results_registry under family "disorder".
+
 ## synthesis/results_registry.tsv  (results_registry.py)
 family, test, term, estimate, ci_low, ci_high, p_value, p_adj, hypothesis {confirmatory,exploratory}
 (families: association, cooccurrence, ecology, selection, reconciliation, ancestral --

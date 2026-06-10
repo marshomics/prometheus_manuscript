@@ -157,6 +157,27 @@ def normalize_selection(df: pd.DataFrame):
     return rows
 
 
+def normalize_disorder(df: pd.DataFrame):
+    """Normalize disorder_associations.tsv (predictor, level, model, estimate, ...).
+
+    Disorder is sequence-PREDICTED, so these are always exploratory (classify_hypothesis
+    returns exploratory for the 'disorder' family). One row per predictor term.
+    """
+    rows = []
+    for _, row in df.iterrows():
+        term = "_".join(p for p in (str(row.get("predictor", "")), str(row.get("level", "")))
+                        if p and p.lower() not in ("nan", ""))
+        rows.append({
+            "family": "disorder",
+            "test": str(row.get("model", "")).strip(),
+            "term": term.strip(),
+            "estimate": safe_float(row.get("estimate")),
+            "ci_low": None, "ci_high": None,
+            "p_value": safe_float(row.get("p_value")),
+        })
+    return rows
+
+
 def normalize_reconciliation(df: pd.DataFrame):
     """Normalize reconciliation_events.tsv into canonical rows (transfer signal).
 
@@ -240,6 +261,7 @@ def main():
     ap.add_argument("--selection", required=True)
     ap.add_argument("--reconciliation", required=True)
     ap.add_argument("--ancestral", required=True)
+    ap.add_argument("--disorder", default="", help="optional disorder_associations.tsv")
     ap.add_argument("--fdr", default="BH")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
@@ -254,6 +276,8 @@ def main():
     # Evolutionary tests (now collected centrally so the FDR regime sees EVERY test):
     all_rows.extend(load_table(args.reconciliation, normalize_reconciliation))
     all_rows.extend(load_table(args.ancestral, normalize_ancestral))
+    # Disorder (opt-in; exploratory). Empty arg / missing file -> contributes nothing.
+    all_rows.extend(load_table(args.disorder, normalize_disorder))
 
     if not all_rows:
         utils.write_empty(args.out, HEADER)

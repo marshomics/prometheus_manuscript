@@ -19,11 +19,35 @@ include: "rules/distribution.smk"
 include: "rules/evolution.smk"
 include: "rules/ecology.smk"
 include: "rules/synthesis.smk"
+include: "rules/plots_extra.smk"
+include: "rules/crossdomain.smk"
+include: "rules/disorder.smk"
 
 
 rule all:
     input:
         all_targets()
+
+
+rule disorder:
+    """Opt-in intrinsic-disorder module (set disorder.enabled: true). Consensus disorder
+    on intact Prometheus loci, anchored to the family alignment, compared across
+    methanogens/niches/lineages (phylolm) and bacteria vs archaea when that branch is
+    also on. Consumes archaeal proteins/catalog/alignment/tree read-only; the default
+    `all` run is unaffected unless disorder.enabled."""
+    input:
+        disorder_targets()
+
+
+rule crossdomain:
+    """Opt-in bacterial / cross-domain branch (set bacteria.enabled: true). Reuses the
+    archaeal validation/prevalence/architecture/selection/co-occurrence scripts on a
+    pre-computed bacterial DefenseFinder set, and builds the combined cross-domain
+    phylogeny (origin + bacteria<->archaea transfer direction). Does NOT alter the
+    archaeal `all`/`preprocess` runs; it consumes the archaeal Prometheus proteins as a
+    read-only input."""
+    input:
+        crossdomain_targets()
 
 
 rule preprocess:

@@ -153,10 +153,18 @@ main <- function() {
     make_option("--nsim", type = "integer", default = 1000),
     make_option("--seed", type = "integer", default = 12345),
     make_option("--out", type = "character"),
+    make_option("--out-null", type = "character", dest = "out_null", default = NULL),
     make_option("--plot-prefix", type = "character", dest = "plot_prefix")
   )
   opt <- parse_args(OptionParser(option_list = option_list))
   set.seed(opt$seed)
+
+  # The enrichment figure reads the null distribution; always emit at least a header
+  # so the file exists on every code path (trivial tree, early returns, success).
+  if (!is.null(opt$out_null)) {
+    dir.create(dirname(opt$out_null), showWarnings = FALSE, recursive = TRUE)
+    con <- file(opt$out_null, "w"); writeLines("kind\tvalue", con); close(con)
+  }
 
   tryCatch({
     stopifnot(!is.null(opt$tree), !is.null(opt$master), !is.null(opt$out),
@@ -280,7 +288,7 @@ main <- function() {
     # phylogenetic autocorrelation.
     enrichment_p <- NA_real_
     obs_meth_gains <- NA_real_; exp_meth_gains <- NA_real_
-    null_method <- "not_run"
+    null_method <- "not_run"; null_means <- numeric(0)
     if (length(unique(mvec)) >= 2 && !anyNA(mvec)) {
       meth_named <- setNames(as.integer(mvec), tree$tip.label)
       meth_edges <- tryCatch(edge_into_methanogen(tree, meth_named),
@@ -355,6 +363,18 @@ main <- function() {
 
     dir.create(dirname(opt$out), showWarnings = FALSE, recursive = TRUE)
     readr::write_tsv(out, opt$out)
+
+    # ---- null distribution for the enrichment figure -------------- #
+    if (!is.null(opt$out_null)) {
+      # label the null rows 'sim' (NOT 'null' -- downstream pandas would read the
+      # literal string "null" as NaN and drop the whole distribution).
+      nd <- data.frame(kind = character(0), value = numeric(0), stringsAsFactors = FALSE)
+      if (length(null_means))
+        nd <- rbind(nd, data.frame(kind = "sim", value = null_means))
+      if (is.finite(obs_meth_gains))
+        nd <- rbind(nd, data.frame(kind = "observed", value = obs_meth_gains))
+      tryCatch(readr::write_tsv(nd, opt$out_null), error = function(e) invisible(NULL))
+    }
 
     # ---- figure: densityMap of presence, titled by n_indep -------- #
     title <- sprintf("Prometheus gains/losses (n independent acquisitions = %.2f)",

@@ -21,6 +21,8 @@ properties:
   evolution: { type: object }
   ecology: { type: object }
   stats: { type: object }
+  bacteria: { type: object }
+  disorder: { type: object }
   plotting: { type: object }
   threads: { type: object }
 required:

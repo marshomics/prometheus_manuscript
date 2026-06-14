@@ -101,41 +101,88 @@ checkv download_database resources/db
 # GTDB-Tk + KOfam + Pfam: download the release; see resources/README.md
 ```
 
-## 2. Provide data
+## 2. Required inputs and configuration
 
-The pipeline starts from a metadata table over **all** your input genomes plus the
-genome FASTAs; Phase-1 preprocessing turns those into the species-level,
-quality-filtered set the analysis uses. You do not prepare a samples sheet or a
-genomes folder by hand, and dRep is not used.
+Phase 1 starts from a metadata table over **all** your input genomes plus the genome
+FASTAs, and turns them into the species-level, quality-filtered set Phase 2 analyzes.
+You do not prepare a samples sheet, a genomes folder, or run dRep by hand: Phase 1
+writes `results/preprocess/species_metadata.tsv`, the single table both downstream
+phases consume. Everything you supply is set in `config/config.yaml`; paths are
+relative to the working directory unless absolute. `resources/README.md` gives the
+download command for each database and reference file.
 
-- **Input metadata** (`config: input.metadata`, e.g. `input_genomes_metadata_with_niches.tsv`):
-  one row per genome with `genome_id`, `filename`, `source`, and one binary (0/1)
-  column per environment named `group_*` / `niche_*` (1 = the genome was observed
-  in that group/niche). These niche columns become the ecology predictors.
-- **Input genome FASTAs**: point `config: input.genomes_dir` at the directory that
-  holds the files named in the metadata's `filename` column (your store, not the
-  working folder).
-- **Databases + reference sequences**: stage them and point `config/config.yaml` at
-  them. **`resources/README.md` lists every file.** The reference protein sets
-  (`prometheus_reference.faa`, `paralog_reference.faa`, the mcr HMMs, and the
-  labelled McrA reference alignment) are the defensibility-critical inputs.
+### 2a. What you must provide (core archaeal run)
 
-Phase 1 then writes **one** filtered table,
-`results/preprocess/species_metadata.tsv` (the genome list + taxonomy + QC +
-unioned niches: both the samples sheet and the metadata), and stages the
-representative genomes. That single table is what Phase 2 consumes. Input genomes
-are all `*.fasta` (`config: input.genome_extension`); only genomes GTDB-Tk places in
-`d__Archaea` are kept; novel / unassigned GTDB species are dropped; MAG/isolate type
-is not recorded or used anywhere (quality is completeness, contamination, contig
-count, and N50). The table carries an `assembly_path` column naming the assembly each
-step reads. Gene calling (Prodigal) then writes per-genome `.faa` proteins and `.fna`
-CDS whose headers are rewritten to `{genome}_{N}` (identical between the two files);
-the `.faa` is the input to DefenseFinder and the downstream analyses.
+| Input | config key(s) | What it is / how to get it |
+|---|---|---|
+| Input genome metadata | `input.metadata` | one row per genome: `genome_id`, `filename`, `source`, and one 0/1 column per environment named `group_*` / `niche_*` (1 = observed there). The niche columns become the ecology predictors. |
+| Input genome assemblies | `input.genomes_dir`, `input.genome_extension` (default `fasta`) | **must set** `input.genomes_dir` — the directory holding the FASTAs named in the metadata `filename` column. |
+| CheckM2 database | `db.checkm2` | completeness/contamination, Phase 1. `checkm2 database --download`. |
+| GTDB-Tk reference data | `db.gtdbtk_data` | taxonomy (Phase 1) + ar53 marker MSA (Phase 2). Download the release matching your GTDB-Tk version. |
+| Pfam-A HMMs (pressed) | `db.pfam_hmm` | domain architecture. `hmmpress Pfam-A.hmm`. |
+| geNomad database | `db.genomad` | provirus / virus prediction (ecology). `genomad download-database`. |
+| CheckV database | `db.checkv` | provirus quality (ecology). `checkv download_database`. |
+| Prometheus reference proteins | `refs.prometheus_faa` | validated Prometheus incl. the characterized *P. aeruginosa* protein; roots the validation tree. |
+| Paralog outgroup proteins | `refs.paralog_faa` | DNA2 / NurA / HerA and other helicase-nucleases; the outgroup that rejects cellular paralogs. |
+| mcr profile HMMs | `refs.mcr_hmm_dir` | mcrA / mcrB / mcrG HMMs; defines methanogens from genes. |
+| McrA reference alignment + labels | `refs.mcrA_ref_aln`, `refs.mcrA_ref_labels` | curated McrA alignment with ANME / methanogen labels; separates methanogens from ANME. |
+| DefenseFinder models | (post-install, not a path) | run `defense-finder update` to fetch models **≥ v2.0.0** (the version that first contains Prometheus). The env pins the software at ≥ 2.0.0 and the `defensefinder_check` rule fails fast if either is too old. |
 
-If you already have DefenseFinder outputs and prefer to ingest rather than re-run,
-set `prometheus.run_defensefinder: false` and drop them under
-`resources/defensefinder/{genome_id}/`. Re-running under a pinned version (the
-default) is more reproducible.
+The four reference sets (`prometheus_faa`, `paralog_faa`, the mcr HMMs, and the labelled
+McrA alignment) are the defensibility-critical inputs — detection and validation are only
+as good as these, so curate them deliberately. `db.kofam_profiles` / `db.kofam_ko_list`
+and `db.interproscan` are optional and left `""` by default.
+
+### 2b. Config keys to review before launching
+
+| Key | Set it to | Why |
+|---|---|---|
+| `input.genomes_dir` | your assemblies directory | required; empty by default |
+| `db.*` and `refs.*` | the staged paths in 2a | required for the stages that use them |
+| `tree.outgroup` **or** `tree.outgroup_taxon` | a lineage appropriate to your genome set | gives a defensible root; otherwise the species tree falls back to midpoint, a heuristic for rate-variable archaeal trees |
+| `prometheus.run_defensefinder` | `true` to run, `false` to ingest | if `false`, drop existing DefenseFinder output under `prometheus.defensefinder_provided_dir/{genome_id}/` |
+| `preprocess.quality.*`, `qc.*`, `stats.confidence_tiers_primary` | defaults are defensible | change only deliberately (see §4) |
+
+Everything else has a defensible default (§4).
+
+### 2c. Optional modules (extra inputs, off by default)
+
+Each adds nothing to the core run until enabled, and is built with its own target
+(`crossdomain`, `disorder`); see §8 and §9 for the science.
+
+**Bacterial / cross-domain branch** — `bacteria.enabled: true`, target `crossdomain`:
+
+| Input | config key(s) | Required when enabled? |
+|---|---|---|
+| Combined DefenseFinder systems + genes tables | `bacteria.df_systems`, `bacteria.df_genes` | yes |
+| Per-genome proteomes + CDS | `bacteria.faa_dir`, `bacteria.cds_dir` | yes (CDS needed for cross-domain dN/dS) |
+| GTDB taxonomy + QC (completeness) | `bacteria.taxonomy`, `bacteria.qc` | yes |
+| GTDB bac120 reference tree | `bacteria.gtdb_bac_tree` | for the phylogeny-controlled tests (co-occurrence, niche, viral) |
+| Genome-column names in the DF tables | `bacteria.systems_genome_col`, `bacteria.genes_genome_col` | adjust to match your tables |
+| Oxygen / biome / host labels | `bacteria.niche_metadata` | optional — activates the niche specificity control |
+| Bacterial assemblies | `bacteria.genomes_dir`, `bacteria.genome_extension` | optional — activates the provirus / R-loop mechanism test |
+
+**Intrinsic-disorder module** — `disorder.enabled: true`, target `disorder`:
+
+| Input | config key | Required when enabled? |
+|---|---|---|
+| IUPred3 install | `disorder.iupred3_path` | recommended — the independent second predictor (free academic, license-gated; download once). Without it the module uses the metapredict + alphaPredict fallback and labels it as the weaker consensus. |
+| Temperature-proxy niche columns | `disorder.temperature_cols` | optional — covariates for the niche tests |
+| Host-proteome background table | `disorder.host_background` | optional — normalizes disorder against lineage baseline |
+
+metapredict, alphaPredict, and segmasker install with the module's conda env; only
+IUPred3 is staged by hand.
+
+### 2d. What Phase 1 produces, and the ingest shortcut
+
+Phase 1 writes `results/preprocess/species_metadata.tsv` (genome list + taxonomy + QC +
+unioned niches), which serves as both the samples sheet and the metadata for Phase 2,
+and stages one representative genome per GTDB species. Only genomes GTDB-Tk places in
+`d__Archaea` are kept; novel / unassigned GTDB species are dropped; quality is
+completeness, contamination, contig count, and N50 (MAG/isolate type is never used).
+Gene calling (Prodigal) then writes per-genome `.faa` proteins and `.fna` CDS with
+matching `{genome}_{N}` headers; the `.faa` feeds DefenseFinder and everything
+downstream. Inspect that table and the Phase-1 quality plot before launching Phase 2.
 
 ## 3. Run
 

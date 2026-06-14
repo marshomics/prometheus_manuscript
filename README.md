@@ -162,6 +162,32 @@ Each adds nothing to the core run until enabled, and is built with its own targe
 | Oxygen / biome / host labels | `bacteria.niche_metadata` | optional — activates the niche specificity control |
 | Bacterial assemblies | `bacteria.genomes_dir`, `bacteria.genome_extension` | optional — activates the provirus / R-loop mechanism test |
 
+*Format of the bacterial DefenseFinder inputs.* `df_systems` and `df_genes` are your
+per-genome DefenseFinder `*_defense_finder_systems.tsv` and `*_defense_finder_genes.tsv`
+concatenated into one of each, with a **genome column added** so every row records which
+genome it came from. Only a few columns are read; the rest are carried through unchanged.
+
+- `df_systems` must contain: the genome column (`bacteria.systems_genome_col`, default
+  `genome_id`; `genome` / `user_genome` / `sample` / `assembly` / `replicon` are also
+  recognized), `sys_id`, and `type` and/or `subtype`. The system is matched
+  case-insensitively against `bacteria.system` (default `Prometheus`) in `type`/`subtype`;
+  `type` is also read downstream to build the bacterial defense matrix, so keep it.
+- `df_genes` must contain: the genome column (`bacteria.genes_genome_col`), `sys_id`
+  (matching the systems table for the same genome), `hit_id` (the protein identifier),
+  and optionally `hit_score` (or `score`).
+- `faa_dir` holds `{genome_id}.faa` — the **same proteomes DefenseFinder was run on**, so
+  each `hit_id` equals a protein's FASTA header (first whitespace token). `cds_dir`
+  (optional) holds the matching `{genome_id}.fna` CDS used for cross-domain dN/dS.
+
+`extract_bacterial_prometheus.py` consumes these: it splits `df_systems` into the
+per-genome layout the archaeal scripts already understand
+(`results/bacteria/defense/{g}/{g}_defense_finder_systems.tsv`), so `validate_prometheus`,
+`build_defense_matrix`, and the defense-load count reuse it unchanged, and it pulls the
+Prometheus systems' member proteins (via the `df_genes` `hit_id`s) from `faa_dir` to form
+the bacterial candidates that feed validation and the cross-domain tree. The `genome_id`
+values must be identical across `df_systems`, `df_genes`, the `.faa`/`.fna` filenames,
+`bacteria.taxonomy`, and `bacteria.qc`, and must not contain `__`.
+
 **Intrinsic-disorder module** — `disorder.enabled: true`, target `disorder`:
 
 | Input | config key | Required when enabled? |

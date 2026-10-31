@@ -1,7 +1,8 @@
 # =====================================================================
 # Extra figures (added ALONGSIDE the existing plots; nothing is replaced).
-# Each reuses plotting_style.py (600-dpi PNG + Illustrator-editable SVG) and
-# degrades to a labelled placeholder on empty input, like the existing plots.
+# Each reuses plotting_style.py (config plotting.formats / dpi / fonts via the PROM_*
+# variables exported in common.smk; default 600-dpi PNG + Illustrator-editable SVG) and
+# writes a labelled placeholder only for empty input; any other failure fails the rule.
 # Foreground: distribution/architecture, ecology, evolution.
 # =====================================================================
 
@@ -13,12 +14,13 @@ rule plot_qc_extra:
         expand(f"{RESULTS}/qc/plots/prometheus_covariates.{{ext}}", ext=PLOT_FORMATS),
     params:
         outdir=f"{RESULTS}/qc/plots",
+    log: f"{LOGS}/plots/plot_qc_extra.log"
     conda: "../envs/plotting.yaml"
     threads: T_SMALL
     resources: mem_mb=4000, runtime=30
     shell:
         r"""
-        python workflow/scripts/py/plot_qc_extra.py --master {input.master} --outdir {params.outdir}
+        python workflow/scripts/py/plot_qc_extra.py --master {input.master} --outdir {params.outdir} > {log} 2>&1
         """
 
 
@@ -33,6 +35,8 @@ rule plot_distribution_extra:
         expand(f"{RESULTS}/distribution/plots/cooccurrence_oddsratio.{{ext}}", ext=PLOT_FORMATS),
     params:
         outdir=f"{RESULTS}/distribution/plots",
+        formats=",".join(PLOT_FORMATS),
+    log: f"{LOGS}/plots/plot_distribution_extra.log"
     conda: "../envs/plotting.yaml"
     threads: T_SMALL
     resources: mem_mb=4000, runtime=30
@@ -40,7 +44,7 @@ rule plot_distribution_extra:
         r"""
         python workflow/scripts/py/plot_distribution_extra.py \
             --prevalence {input.prevalence} --cooccurrence {input.cooccurrence} \
-            --master {input.master} --outdir {params.outdir}
+            --master {input.master} --outdir {params.outdir} --formats "{params.formats}" > {log} 2>&1
         """
 
 
@@ -57,6 +61,7 @@ rule plot_diversity_extra:
         expand(f"{RESULTS}/diversity/plots/subfamily_identity_curve.{{ext}}", ext=PLOT_FORMATS),
     params:
         outdir=f"{RESULTS}/diversity/plots",
+    log: f"{LOGS}/plots/plot_diversity_extra.log"
     conda: "../envs/plotting.yaml"
     threads: T_SMALL
     resources: mem_mb=4000, runtime=30
@@ -64,7 +69,7 @@ rule plot_diversity_extra:
         r"""
         python workflow/scripts/py/plot_diversity_extra.py \
             --typology {input.typology} --catalog {input.catalog} --master {input.master} \
-            --subfamilies {input.subfamilies} --outdir {params.outdir}
+            --subfamilies {input.subfamilies} --outdir {params.outdir} > {log} 2>&1
         """
 
 
@@ -80,6 +85,9 @@ rule plot_ecology_extra:
         expand(f"{RESULTS}/ecology/plots/prevalence_niche_phylum.{{ext}}", ext=PLOT_FORMATS),
     params:
         outdir=f"{RESULTS}/ecology/plots",
+        tiers=",".join(str(t) for t in cfg("stats/confidence_tiers_primary", ["A"])) or "A",
+        formats=",".join(PLOT_FORMATS),
+    log: f"{LOGS}/plots/plot_ecology_extra.log"
     conda: "../envs/plotting.yaml"
     threads: T_SMALL
     resources: mem_mb=4000, runtime=30
@@ -87,7 +95,7 @@ rule plot_ecology_extra:
         r"""
         python workflow/scripts/py/plot_ecology_extra.py \
             --master {input.master} --viral {input.viral} --associations {input.associations} \
-            --outdir {params.outdir}
+            --outdir {params.outdir} --primary-tiers "{params.tiers}" --formats "{params.formats}" > {log} 2>&1
         """
 
 
@@ -104,6 +112,7 @@ rule plot_evolution_extra:
         expand(f"{RESULTS}/evolution/plots/gain_enrichment_null.{{ext}}", ext=PLOT_FORMATS),
     params:
         outdir=f"{RESULTS}/evolution/plots",
+    log: f"{LOGS}/plots/plot_evolution_extra.log"
     conda: "../envs/plotting.yaml"
     threads: T_SMALL
     resources: mem_mb=4000, runtime=30
@@ -111,5 +120,5 @@ rule plot_evolution_extra:
         r"""
         python workflow/scripts/py/plot_evolution_extra.py \
             --sites {input.sites} --reconciliation {input.reconciliation} \
-            --gains {input.gains} --gains-null {input.gains_null} --outdir {params.outdir}
+            --gains {input.gains} --gains-null {input.gains_null} --outdir {params.outdir} > {log} 2>&1
         """

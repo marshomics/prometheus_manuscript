@@ -58,26 +58,117 @@ rule preprocess:
         preprocess_targets()
 
 
+# ---- provenance ------------------------------------------------------------
+# Every per-rule conda env records its OWN exact package builds (one probe rule per env
+# file, run inside that env), and `provenance` aggregates them with the Snakemake
+# version, the database release markers, checksums of the defensibility-critical
+# reference files and the resolved config. (A single rule can only see the tools of its
+# own env, so the previous one-env probe recorded almost nothing.)
+import glob as _glob
+import hashlib as _hashlib
+import json as _json
+from snakemake import __version__ as _SMK_VERSION
+
+PROV_ENVS = sorted(os.path.splitext(os.path.basename(p))[0]
+                   for p in _glob.glob(os.path.join(workflow.basedir, "envs", "*.yaml")))
+if not DISORDER_ENABLED:
+    PROV_ENVS = [e for e in PROV_ENVS if e != "disorder"]   # heavy (torch); only when the module is on
+
+for _env in PROV_ENVS:
+    rule:
+        name: f"provenance_env_{_env}"
+        output: f"{RESULTS}/provenance/envs/{_env}.txt"
+        params: env=_env
+        log: f"{LOGS}/provenance/env_{_env}.log"
+        conda: f"envs/{_env}.yaml"
+        threads: 1
+        resources: mem_mb=1000, runtime=15
+        shell:
+            r"""
+            mkdir -p $(dirname {output})
+            if [ -z "${{CONDA_PREFIX:-}}" ] || [ ! -d "$CONDA_PREFIX/conda-meta" ]; then
+                echo "provenance: no active conda env for {params.env} (run with --use-conda / --sdm conda)" >&2
+                exit 1
+            fi
+            {{
+              echo "# conda env file: workflow/envs/{params.env}.yaml"
+              echo "# prefix: $CONDA_PREFIX"
+              for f in "$CONDA_PREFIX"/conda-meta/*.json; do basename "$f" .json; done | sort
+              if [ "{params.env}" = "defensefinder" ]; then
+                echo "# macsydata list (installed MacSyFinder/DefenseFinder model packages)"
+                macsydata list 2>&1 || echo "macsydata list failed"   # nonfatal: informational listing only
+              fi
+            }} > {output} 2> {log}
+            """
+
+
+def _file_fingerprint(path):
+    """size, mtime and (for files <= 200 MB) md5 of a reference/database file."""
+    if not path or not os.path.exists(path):
+        return "MISSING"
+    if os.path.isdir(path):
+        n = sum(len(fs) for _, _, fs in os.walk(path))
+        return f"directory ({n} files)"
+    st = os.stat(path)
+    out = f"size={st.st_size} mtime={int(st.st_mtime)}"
+    if st.st_size <= 200 * 1024 ** 2:
+        h = _hashlib.md5()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        out += f" md5={h.hexdigest()}"
+    return out
+
+
+def _head(path, n=3):
+    try:
+        with open(path) as fh:
+            return " | ".join(next(fh).strip() for _ in range(n))
+    except (OSError, StopIteration, UnicodeDecodeError):
+        return ""
+
+
 rule provenance:
-    """Record tool and database versions for reproducibility."""
+    """Record tool, database and reference versions for reproducibility (methods section)."""
+    input:
+        envs=expand(f"{RESULTS}/provenance/envs/{{env}}.txt", env=PROV_ENVS),
+        # what the DefenseFinder preflight actually verified (software, models, CasFinder
+        # versions, model md5s, positive control) -- key<TAB>value
+        defensefinder=rules.defensefinder_check.output.ok,
     output:
         f"{RESULTS}/provenance/versions.txt"
-    conda:
-        "envs/qc.yaml"
-    shell:
-        r"""
-        mkdir -p $(dirname {output})
-        {{
-          echo "# Prometheus pipeline provenance"
-          date -u +"generated_utc=%Y-%m-%dT%H:%M:%SZ"
-          echo "snakemake=$(snakemake --version 2>/dev/null || echo NA)"
-          echo "conda=$(conda --version 2>/dev/null || echo NA)"
-          for tool in checkm2 gtdbtk defense-finder mmseqs iqtree2 mafft clipkit \
-                      generax hyphy genomad checkv hmmsearch seqkit drep prodigal; do
-            v=$(command -v $tool >/dev/null 2>&1 && ($tool --version 2>&1 | head -n1) || echo "not-on-PATH-here")
-            echo "$tool=$v"
-          done
-          # DefenseFinder models version (the Prometheus model needs models >= 2.0.0).
-          echo "defense-finder-models=$(command -v macsydata >/dev/null 2>&1 && (macsydata info defense-finder-models 2>/dev/null | grep -i -m1 version || echo unknown) || echo macsydata-not-on-PATH)"
-        }} > {output}
-        """
+    log:
+        f"{LOGS}/provenance/versions.log"
+    run:
+        import datetime
+        db, refs = config.get("db", {}), config.get("refs", {})
+        lines = ["# Prometheus pipeline provenance",
+                 "generated_utc=" + datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 f"snakemake={_SMK_VERSION}", "", "## databases"]
+        gt = db.get("gtdbtk_data", "")
+        lines.append(f"gtdbtk_data={gt} :: {_head(os.path.join(gt, 'metadata', 'metadata.txt'), 2) or _file_fingerprint(gt)}")
+        pf = db.get("pfam_hmm", "")
+        pf_ver = _head(os.path.join(os.path.dirname(pf), "Pfam.version"), 2) if pf else ""
+        lines.append(f"pfam_hmm={pf} :: {pf_ver or _head(pf, 1)} :: {_file_fingerprint(pf)}")
+        lines.append(f"checkm2={db.get('checkm2', '')} :: {_file_fingerprint(db.get('checkm2', ''))}")
+        gn = db.get("genomad", "")
+        lines.append(f"genomad={gn} :: {_head(os.path.join(gn, 'version.txt'), 1) or _file_fingerprint(gn)}")
+        lines.append(f"checkv={db.get('checkv', '')} :: {_file_fingerprint(db.get('checkv', ''))}")
+        lines += ["", "## reference sets (defensibility-critical)"]
+        for k in ("prometheus_faa", "paralog_faa", "mcrA_ref_aln", "mcrA_ref_labels"):
+            lines.append(f"{k}={refs.get(k, '')} :: {_file_fingerprint(refs.get(k, ''))}")
+        hd = refs.get("mcr_hmm_dir", "")
+        for p in sorted(_glob.glob(os.path.join(hd, "*"))) if hd else []:
+            lines.append(f"mcr_hmm={p} :: {_file_fingerprint(p)}")
+        lines += ["", "## DefenseFinder preflight (results/defense/.defensefinder_ok)"]
+        with open(input.defensefinder) as fh:
+            lines += [l.rstrip("\n") for l in fh if l.strip()]
+        lines += ["", "## conda environments (exact package builds per rule env)"]
+        for p in input.envs:
+            with open(p) as fh:
+                lines += [l.rstrip("\n") for l in fh]
+            lines.append("")
+        lines += ["## resolved configuration", _json.dumps(config, indent=1, sort_keys=True, default=str)]
+        os.makedirs(os.path.dirname(output[0]), exist_ok=True)
+        with open(output[0], "w") as fh:
+            fh.write("\n".join(lines) + "\n")

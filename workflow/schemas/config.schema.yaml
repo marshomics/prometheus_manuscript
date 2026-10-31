@@ -1,30 +1,305 @@
 $schema: "http://json-schema.org/draft-07/schema#"
-description: Configuration for the Prometheus-in-archaea pipeline
+description: >
+  Configuration for the Prometheus-in-archaea pipeline. Validated at DAG build
+  (common.smk; a violation is an error). Known keys are type-, enum- and range-checked;
+  additional keys are allowed so older configs keep working. Rule defaults (cfg()) apply
+  to keys that are absent.
 type: object
+definitions:
+  tier_list:
+    type: array
+    items: { type: string, enum: ["A", "B", "C"] }
+    minItems: 1
+    uniqueItems: true
+  fraction: { type: number, minimum: 0, maximum: 1 }
+  percent: { type: number, minimum: 0, maximum: 100 }
+  posint: { type: integer, minimum: 1 }
+  nonneg_int: { type: integer, minimum: 0 }
+  str_list: { type: array, items: { type: string } }
+  domain_category:
+    type: object
+    properties:
+      names: { type: array, items: { type: string, minLength: 1 } }
+      accessions: { type: array, items: { type: string, pattern: "^PF[0-9]{5}(\\.[0-9]+)?$" } }
+      required: { type: boolean }
+    anyOf:
+      - { required: [names] }
+      - { required: [accessions] }
 properties:
   samples: { type: string }
   metadata: { type: string }
   genomes_dir: { type: string }
-  genome_extension: { type: string }
-  results_dir: { type: string }
-  logs_dir: { type: string }
+  genome_extension: { type: string, minLength: 1 }
+  results_dir: { type: string, minLength: 1 }
+  logs_dir: { type: string, minLength: 1 }
   seed: { type: integer }
-  input: { type: object }
-  preprocess: { type: object }
+  input:
+    type: object
+    properties:
+      metadata: { type: string }
+      genomes_dir: { type: string }
+      genome_extension: { type: string }
+      id_column: { type: string, minLength: 1 }
+      filename_column: { type: string, minLength: 1 }
+      source_column: { type: string }
+  preprocess:
+    type: object
+    properties:
+      gtdbtk_batch_size: { $ref: "#/definitions/posint" }
+      quality:
+        type: object
+        properties:
+          min_completeness: { $ref: "#/definitions/percent" }
+          max_contamination: { $ref: "#/definitions/percent" }
+          max_contigs: { $ref: "#/definitions/posint" }
+          min_n50: { $ref: "#/definitions/nonneg_int" }
+          min_quality_score: { type: number }
+      keep_domain: { type: string, enum: ["Archaea", "Bacteria", ""] }
+      niche_aggregation: { type: string, enum: ["all", "passing"] }
+      unclassified_species: { type: string, enum: ["drop", "singleton"] }
+      bbmap: { type: object }
+      checkm2_extra: { type: string }
   db: { type: object }
   refs: { type: object }
-  qc: { type: object }
-  prometheus: { type: object }
-  diversity: { type: object }
-  tree: { type: object }
-  methanogen: { type: object }
-  evolution: { type: object }
-  ecology: { type: object }
-  stats: { type: object }
-  bacteria: { type: object }
-  disorder: { type: object }
-  plotting: { type: object }
-  threads: { type: object }
+  qc:
+    type: object
+    properties:
+      completeness_floor: { $ref: "#/definitions/percent" }
+      contamination_ceiling: { $ref: "#/definitions/percent" }
+      tier_high_completeness: { $ref: "#/definitions/percent" }
+      tier_high_contamination: { $ref: "#/definitions/percent" }
+      prodigal_mode: { type: string, enum: ["single", "meta"] }
+      prodigal_translation_table:   # the tables Prodigal 2.6.3 accepts (main.c); others exit 15
+        { type: integer, enum: [1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 25] }
+  prometheus:
+    type: object
+    properties:
+      run_defensefinder: { type: boolean }
+      defensefinder_provided_dir: { type: string }
+      defensefinder_system: { type: string, minLength: 1 }
+      defensefinder_version: { type: string, pattern: "^[0-9]+\\.[0-9]+\\.[0-9]+$" }
+      defensefinder_models_pin: { type: string, pattern: "^[0-9]+\\.[0-9]+\\.[0-9]+$" }
+      defensefinder_casfinder_pin: { type: string, pattern: "^[0-9]+\\.[0-9]+\\.[0-9]+$" }
+      defensefinder_models_dir: { type: string }
+      defensefinder_positive_control: { type: boolean }
+      defensefinder_gene: { type: string, minLength: 1 }
+      strict_detection: { type: boolean }
+      validation_tree_model: { type: string, minLength: 1 }
+      placement_min_alrt: { $ref: "#/definitions/percent" }
+      placement_min_ufboot: { $ref: "#/definitions/percent" }
+      min_len_aa: { $ref: "#/definitions/posint" }
+      max_len_aa: { $ref: "#/definitions/posint" }
+      context_window: { $ref: "#/definitions/nonneg_int" }
+      domains:
+        type: object
+        minProperties: 1
+        additionalProperties: { $ref: "#/definitions/domain_category" }
+  diversity:
+    type: object
+    properties:
+      mmseqs_identities:
+        type: array
+        minItems: 1
+        items: { type: number, exclusiveMinimum: 0, maximum: 1 }
+      mmseqs_coverage: { $ref: "#/definitions/fraction" }
+      mmseqs_cov_mode: { type: integer, enum: [0, 1, 2, 3, 4, 5] }
+      mmseqs_sensitivity: { type: number, minimum: 1, maximum: 7.5 }
+      rarefaction_permutations: { $ref: "#/definitions/posint" }
+  tree:
+    type: object
+    properties:
+      scope: { type: string, enum: ["focal", "domain"] }
+      marker_set: { type: string, enum: ["ar53", "bac120"] }
+      gtdbtk_classify_extra: { type: string }
+      rooting_method: { type: string, enum: ["outgroup", "midpoint"] }
+      outgroup_on_failure: { type: string, enum: ["fail", "midpoint"] }
+      min_perc_aa: { $ref: "#/definitions/percent" }
+      outgroup: { $ref: "#/definitions/str_list" }
+      outgroup_taxon: { type: string }
+      iqtree_model: { type: string, minLength: 1 }
+      pmsf: { type: boolean }
+      pmsf_guide_model: { type: string }
+      pmsf_model: { type: string }
+      ufboot: { type: integer, minimum: 1000 }   # IQ-TREE -B requires >= 1000
+      alrt: { $ref: "#/definitions/nonneg_int" }
+  methanogen:
+    type: object
+    properties:
+      mcr_kos:
+        type: array
+        minItems: 1
+        items: { type: string, pattern: "^K[0-9]{5}$" }
+      mcr_required:
+        type: array
+        items: { type: string, pattern: "^K[0-9]{5}$" }
+      kofam_score_fraction: { type: number, exclusiveMinimum: 0, maximum: 2 }
+      partial_score_fraction:
+        oneOf:
+          - { type: "null" }
+          - { type: number, exclusiveMinimum: 0, maximum: 1 }
+      anme_via_mcrA_tree: { type: boolean }
+  methanogenesis:
+    type: object
+    additionalProperties: false
+    properties:
+      enabled: { type: boolean }
+      rules: { type: string }
+      readthrough: { type: boolean }
+      absence_alpha: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 0.5 }
+      taxonomy_expectation: { type: string }
+      stats:
+        type: object
+        additionalProperties: false
+        properties:
+          predictors: { type: array, items: { type: string } }
+          habitat: { type: array, items: { type: string } }
+          covariates: { type: array, items: { type: string } }
+          primary_tiers: { type: array, items: { type: string } }
+          sensitivity_tiers: { type: array, items: { type: string } }
+          min_n: { type: integer, minimum: 1 }
+          min_class: { type: integer, minimum: 1 }
+          min_changes: { type: integer, minimum: 1 }
+          nsim: { type: integer, minimum: 1 }
+          corhmm: { type: boolean }
+          epv_min: { type: number, exclusiveMinimum: 0 }
+          vif_max: { type: number, exclusiveMinimum: 1 }
+          complete_threshold: { type: number, minimum: 0, maximum: 100 }
+  evolution:
+    type: object
+    properties:
+      align_tool: { type: string, enum: ["mafft", "famsa"] }
+      linsi_max_seqs: { $ref: "#/definitions/posint" }
+      trim_tool: { type: string, enum: ["clipkit", "none"] }
+      clipkit_mode: { type: string, minLength: 1 }
+      per_domain_trees: { type: boolean }
+      gene_tree_model: { type: string, minLength: 1 }
+      domain_tree_model: { type: string, minLength: 1 }
+      domain_min_taxa: { type: integer, minimum: 4 }
+      codon_table: { type: integer, minimum: 1, maximum: 33 }
+      max_cds_drop_frac: { $ref: "#/definitions/fraction" }
+      reconciliation:
+        type: object
+        properties:
+          run_generax: { type: boolean }
+          run_ale: { type: boolean }
+          generax_model: { type: string }
+          generax_strategy: { type: string, enum: ["SPR", "EVAL"] }
+          subst_model: { type: string, minLength: 1 }
+          ale_samples: { $ref: "#/definitions/posint" }
+      ancestral:
+        type: object
+        properties:
+          method: { type: string, enum: ["simmap"] }
+          nsim: { $ref: "#/definitions/posint" }
+          q_method: { type: string, enum: ["empirical", "mcmc"] }
+          root_prior: { type: string, minLength: 1 }
+          nnull: { $ref: "#/definitions/posint" }
+          prevalence_tol: { $ref: "#/definitions/fraction" }
+      selection:
+        type: object
+        properties:
+          relax_partition: { type: string, enum: ["methanogen", "none"] }
+          relax_labelling: { type: string, enum: ["clade", "terminal"] }
+          gard: { type: boolean }
+          gard_mode: { type: string, enum: ["Faster", "Normal"] }
+          run: { type: boolean }
+          methods:
+            type: array
+            uniqueItems: true
+            items: { type: string, enum: ["FEL", "MEME", "BUSTED", "aBSREL", "RELAX"] }
+          intact_only: { type: boolean }
+          site_pvalue: { type: number, exclusiveMinimum: 0, maximum: 1 }
+  ecology:
+    type: object
+    properties:
+      predictors:
+        oneOf:
+          - { type: string }
+          - { $ref: "#/definitions/str_list" }
+      covariates: { $ref: "#/definitions/str_list" }
+      genomad:
+        type: object
+        properties:
+          splits: { $ref: "#/definitions/nonneg_int" }
+      rloop:
+        type: object
+        properties:
+          models:
+            type: array
+            minItems: 1
+            uniqueItems: true
+            items: { type: string, enum: ["m1", "m2"] }
+          riz_min_g: { $ref: "#/definitions/posint" }
+          window: { $ref: "#/definitions/posint" }
+          min_rlfs_score: { $ref: "#/definitions/posint" }
+          require_rez: { type: boolean }
+  stats:
+    type: object
+    properties:
+      confidence_tiers_primary: { $ref: "#/definitions/tier_list" }
+      confidence_tiers_sensitivity: { $ref: "#/definitions/tier_list" }
+      fdr_method: { type: string, enum: ["BH", "BY", "holm", "bonferroni", "fdr"] }
+      phyloglm_btol: { type: number, exclusiveMinimum: 0 }
+      phyloglm_boot: { $ref: "#/definitions/nonneg_int" }
+      phylo_d_permutations: { $ref: "#/definitions/posint" }
+      cooccurrence_min_count: { $ref: "#/definitions/posint" }
+      confirmatory:
+        type: array
+        items: { type: string, pattern: "^[^:]+:[^:]+:.+$" }
+      alpha: { type: number, exclusiveMinimum: 0, exclusiveMaximum: 1 }
+  bacteria:
+    type: object
+    properties:
+      enabled: { type: boolean }
+      min_completeness: { $ref: "#/definitions/percent" }
+      max_contamination: { $ref: "#/definitions/percent" }
+      allow_missing_proteins: { type: boolean }
+      min_tree_match_fraction: { $ref: "#/definitions/fraction" }
+      system: { type: string, minLength: 1 }
+      covariates: { $ref: "#/definitions/str_list" }
+      crossdomain:
+        type: object
+        properties:
+          min_ufboot: { $ref: "#/definitions/percent" }
+          min_alrt: { $ref: "#/definitions/percent" }
+          n_subsample: { $ref: "#/definitions/nonneg_int" }
+          subsample_min: { $ref: "#/definitions/posint" }
+          robust_fraction: { type: number, exclusiveMinimum: 0, maximum: 1 }
+          ref_domain: { type: string, enum: ["Bacteria", "exclude"] }
+          saturation_pairs: { $ref: "#/definitions/posint" }
+          saturation_ds: { type: number, exclusiveMinimum: 0 }
+          max_codon_drop_frac: { $ref: "#/definitions/fraction" }
+  disorder:
+    type: object
+    properties:
+      enabled: { type: boolean }
+      second_predictor: { type: string, enum: ["auto", "iupred3", "alphapredict", "none"] }
+      iupred3_mode: { type: string, enum: ["long", "short"] }
+      metapredict_threshold: { $ref: "#/definitions/fraction" }
+      iupred3_threshold: { $ref: "#/definitions/fraction" }
+      alphapredict_plddt_cutoff: { $ref: "#/definitions/percent" }
+      min_idr_len: { $ref: "#/definitions/posint" }
+      intact_only: { type: boolean }
+      mask_low_complexity: { type: boolean }
+      temperature_cols: { $ref: "#/definitions/str_list" }
+      min_domain_support: { $ref: "#/definitions/fraction" }
+      min_column_occupancy: { $ref: "#/definitions/fraction" }
+      min_group_size: { $ref: "#/definitions/posint" }
+  plotting:
+    type: object
+    properties:
+      formats:
+        type: array
+        minItems: 1
+        uniqueItems: true
+        items: { type: string, enum: ["png", "svg", "pdf"] }
+      dpi: { type: integer, minimum: 72 }
+      font_family: { type: string }
+      fallback_font: { type: string }
+      base_font_size: { type: number, exclusiveMinimum: 0 }
+  threads:
+    type: object
+    additionalProperties: { $ref: "#/definitions/posint" }
 required:
   - samples
   - genomes_dir

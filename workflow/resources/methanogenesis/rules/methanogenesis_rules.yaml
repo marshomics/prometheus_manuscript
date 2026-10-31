@@ -1,0 +1,110 @@
+# Methanogenesis pathway-capacity rules (read by methanogenesis_search.py and
+# methanogenesis_pathways.py). Rationale and primary citations for every entry: RULES.md
+# in this directory. Change a rule only with a RULES.md entry and a re-run of the benchmark
+# (tests/methanogenesis_benchmark); the benchmark records the SHA-256 of this file.
+version: 1
+
+# Verbatim KEGG module DEFINITION strings (https://rest.kegg.jp/get/<id>, retrieved
+# 2026-10-31). Component expressions below are copied from these strings (module/step noted);
+# tests/methanogenesis checks that each cited step equals the parsed module step.
+kegg_modules:
+  M00567: "(K00200+K00201+K00202+K00203-K11261+(K00205,K11260,K00204)) K00672 K01499 (K00319,K13942) K00320 (K00577+K00578+K00579+K00580+K00581-K00582-K00583+K00584) (K00399+K00401+K00402) ((K22480+K22481+K22482),(K03388+K03389+K03390),(K08264+K08265),(K03388+K03389+K03390+K14127+((K14126+K14128),(K22516+K00125))))"
+  M00357: "((K00925 K00625),K01895) (K00193+K00197+K00194) (K00577+K00578+K00579+K00580+K00581-K00582-K00583+K00584) (K00399+K00401+K00402) (K22480+K22481+K22482,K03388+K03389+K03390,K08264+K08265,K03388+K03389+K03390+K14127+(K14126+K14128,K22516+K00125))"
+  M00356: "K14080+K04480+K14081 K00399+K00401+K00402 (K22480+K22481+K22482,K03388+K03389+K03390,K08264+K08265,K03388+K03389+K03390+K14127+(K14126+K14128,K22516+K00125))"
+  M00563: "K14082 ((K16177-K16176),(K16179-K16178),(K14084-K14083)) (K00399+K00401+K00402) ((K22480+K22481+K22482),(K03388+K03389+K03390),(K08264+K08265),(K03388+K03389+K03390+K14127+((K14126+K14128),(K22516+K00125))))"
+  M00880: "((K03639 K03637),K20967) (K03635,K21142) (((K03831,K03638) K03750),K15376)"
+
+# Stop-codon read-through: Prodigal ends a gene at UAG / UGA; for these KOs only, a homologous
+# fragment ending in that codon is re-translated through it and re-scored at the FULL threshold.
+readthrough:
+  TAG:   # pyrrolysine (O) in the methylamine methyltransferases
+    residue: O
+    kos: [K16176, K16178, K14083]
+  TGA:   # selenocysteine (U) in methanogen selenoproteins (Methanococcales, Methanopyrus)
+    residue: U
+    kos: [K00201, K22516, K03388, K00440, K14126, K14127, K14128]
+
+# Components: a KEGG expression each. `relax` applies to a single subunit complex: the
+# component is present when every `signature` KO is detected and at least `min_fraction` of
+# the mandatory subunit slots are; otherwise the KEGG rule (every mandatory subunit) applies.
+# `one_sided: true` = presence is evidence, absence is not (enzyme systems outside KEGG exist).
+# `part: true` = the expression is ONE alternative of the cited module step, not the whole step.
+components:
+  fwd:      {expr: "K00200+K00201+K00202+K00203-K11261+(K00205,K11260,K00204)", module: M00567, step: 1,
+             relax: {signature: [[K00200, K00202]], min_fraction: 0.6},
+             description: "formylmethanofuran dehydrogenase FwdABCD(E)(F|G|H) / Fmd (W or Mo)"}
+  ftr:      {expr: "K00672", module: M00567, step: 2, description: "formylmethanofuran:H4MPT formyltransferase"}
+  mch:      {expr: "K01499", module: M00567, step: 3, description: "methenyl-H4MPT cyclohydrolase"}
+  mtd:      {expr: "K00319,K13942", module: M00567, step: 4, description: "F420-dependent methylene-H4MPT dehydrogenase Mtd or H2-forming Hmd"}
+  mer:      {expr: "K00320", module: M00567, step: 5, description: "F420-dependent methylene-H4MPT reductase"}
+  mtr:      {expr: "K00577+K00578+K00579+K00580+K00581-K00582-K00583+K00584", module: M00567, step: 6,
+             relax: {signature: [[K00577, K00584]], min_fraction: 0.5},
+             description: "Na+-translocating methyl-H4MPT:CoM methyltransferase MtrA-H"}
+  mcr:      {expr: "K00399+K00401+K00402", module: M00567, step: 7, description: "methyl-CoM reductase (informational; methanogen status comes from classify_methanogen.py)"}
+  moco:     {expr: "((K03639 K03637),K20967) (K03635,K21142) (((K03831,K03638) K03750),K15376)", module: M00880,
+             description: "molybdopterin / tungstopterin cofactor biosynthesis (needed by Fwd/Fmd)"}
+  hdr_abc:  {expr: "K03388+K03389+K03390", relax: {signature: [[K03388, K03389, K03390]], min_fraction: 0.6},
+             description: "cytoplasmic heterodisulfide reductase HdrABC (electron bifurcation)"}
+  hdr_abc2: {expr: "K22480+K22481+K22482", relax: {signature: [[K22480, K22481, K22482]], min_fraction: 0.6},
+             description: "HdrA2B2C2"}
+  hdr_de:   {expr: "K08264+K08265", description: "membrane-bound cytochrome-b heterodisulfide reductase HdrDE (methanogens with cytochromes)"}
+  frh:      {expr: "K00440+K00441+K00443", relax: {signature: [[K00440, K00441, K00443]], min_fraction: 0.6},
+             description: "F420-reducing hydrogenase FrhABG"}
+  mvh:      {expr: "K14126+K14127+K14128", relax: {signature: [[K14126, K14128]], min_fraction: 0.6},
+             description: "F420-non-reducing hydrogenase MvhAGD / VhuAGD"}
+  vht:      {expr: "K14068+K14069+K14070", relax: {signature: [[K14068, K14070]], min_fraction: 0.6},
+             description: "methanophenazine-reducing hydrogenase VhtACG / VhoACG"}
+  ech:      {expr: "K14086+K14087+K14088+K14089+K14090+K14091", relax: {signature: [[K14086, K14090]], min_fraction: 0.5},
+             description: "energy-converting hydrogenase EchA-F"}
+  fdh:      {expr: "K22516+K00125", description: "F420-dependent formate dehydrogenase FdhAB"}
+  ackpta:   {expr: "K00925 K00625", module: M00357, step: 1, part: true,
+             relax: {signature: [K00925], min_fraction: 0.5},
+             description: "acetate kinase AckA then phosphotransacetylase Pta. Relaxed because
+               the KOfam K00625 profile misses the divergent archaeal Pta (Methanosarcina
+               acetivorans C2A scores 379.0 against the curated threshold 387.57); AckA with the
+               rest of the acetate_core (CODH/ACS + Mtr + HdrDE) is the diagnostic combination"}
+  acs:      {expr: "K01895", module: M00357, step: 1, part: true, description: "AMP-forming acetyl-CoA synthetase Acs"}
+  codh:     {expr: "K00193+K00197+K00194", module: M00357, step: 2, relax: {signature: [[K00193, K00197]], min_fraction: 0.6},
+             description: "CO dehydrogenase / acetyl-CoA synthase CdhCED"}
+  mta:      {expr: "K14080+K04480+K14081", module: M00356, step: 1, relax: {signature: [[K04480, K14081]], min_fraction: 0.6},
+             description: "methanol:CoM methyltransferase system MtaA, MtaB, MtaC"}
+  methylamine_mt: {expr: "K14082 ((K16177-K16176),(K16179-K16178),(K14084-K14083))", module: M00563,
+             description: "MtbA plus a mono-, di- or trimethylamine corrinoid protein (methyltransferase optional, as in KEGG)"}
+  pyl:      {expr: "K16180+K16181+K16182-K11627", description: "pyrrolysine biosynthesis PylBCD (PylS optional)"}
+  mts:      {expr: "K16954+K16955", one_sided: true, description: "methylthiol:CoM methyltransferase MtsA + corrinoid MtsB"}
+  quat:     {expr: "K25220,K25600,K26847", one_sided: true, description: "glycine betaine (MtgB), carnitine (MtcB) or proline betaine (MtpB) corrinoid methyltransferase"}
+  methoxyl: {expr: "K25916+K25917", one_sided: true, description: "methoxylated-aromatic methyltransferase MtoB + H4MPT methyltransferase MtoA"}
+
+# Derived terms and pathways: all(...) = every term, any(...) = at least one, not(...),
+# maybe(...) = possible but not inferable (see methanogenesis_pathways.py).
+derived:
+  methyl_branch: "all(fwd, ftr, mch, mtd, mer)"
+  functional_methyl_branch: "all(methyl_branch, moco)"
+  hdr: "any(hdr_abc, hdr_abc2, hdr_de)"
+  h2_uptake: "any(frh, mvh, vht, ech)"
+  electron_input: "any(h2_uptake, fdh)"
+  oxidative_methyl_route: "all(functional_methyl_branch, mtr, hdr_de)"
+  methylamine: "all(methylamine_mt, pyl)"
+  methyl_substrate: "any(mta, methylamine, mts, quat, methoxyl)"
+  acetate_core: "all(codh, mtr, hdr_de)"
+
+pathways:
+  co2_reducing: "all(functional_methyl_branch, mtr, electron_input, hdr)"
+  methylotrophic: "all(methyl_substrate, hdr)"
+  methyl_dismutating: "all(methyl_substrate, oxidative_methyl_route, hdr)"
+  methyl_reducing: "all(methyl_substrate, not(oxidative_methyl_route), electron_input, hdr)"
+  acetoclastic: "any(all(acetate_core, ackpta), all(acetate_core, acs, not(co2_reducing), not(methylotrophic)), maybe(all(acetate_core, acs)))"
+
+substrates:
+  sub_h2: "h2_uptake"
+  sub_formate: "fdh"
+  sub_methanol: "mta"
+  sub_methylamine: "methylamine"
+  sub_methylthiol: "mts"
+  sub_quatamine: "quat"
+  sub_methoxyl: "methoxyl"
+
+# Composite label order for methanogenesis_subtype.
+subtype_order: [co2_reducing, acetoclastic, methyl_dismutating, methyl_reducing]
+subtype_labels: {co2_reducing: CO2-reducing, acetoclastic: acetoclastic, methyl_dismutating: methyl-dismutating,
+                 methyl_reducing: methyl-reducing, methylotrophic: methylotrophic}

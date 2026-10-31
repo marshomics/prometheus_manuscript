@@ -1,217 +1,183 @@
-"""plot_distribution.py — prevalence, association forest, and co-occurrence heatmap.
+"""plot_distribution.py -- prevalence, association forest and co-occurrence heatmap.
 
-Outputs (written to --outdir):
-  prevalence_by_taxon.{png,svg}
-  association_forest.{png,svg}
-  cooccurrence_heatmap.{png,svg}
+Outputs (written to --outdir, one file per --formats extension):
+  prevalence_by_taxon.*    Prometheus prevalence (Wilson 95% CI) for the 20 best-sampled
+                           GTDB families, primary tier set; n and median completeness shown.
+  association_forest.*     methanogen log-odds with 95% CI: naive GLM / Fisher baselines
+                           vs phylogenetic logistic regression (unadjusted and the
+                           confounder-adjusted HEADLINE). fitPagel and D are not log-odds,
+                           so they are printed as text, not drawn on the axis.
+  cooccurrence_heatmap.*   signed -log10(BH p_adj) of the fitPagel test per system; sign
+                           from the Fisher odds-ratio direction (exclusion < 0 < co-occurrence).
+
+A header-only input table (genuinely empty upstream input) gives a labelled placeholder.
+A table that lacks its required columns is an interface error (exit 1).
 """
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from plotting_style import apply_style, save_fig, placeholder, OKABE_ITO, TIER_COLORS
-import utils
+from plotting_style import apply_style, save_fig, placeholder, OKABE_ITO
 
 import argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import matplotlib.colors as mcolors
 
 apply_style()
 
+LOGODDS_TESTS = ["naive_glm", "naive_fisher", "phyloglm_methanogen", "phyloglm_confounders"]
+TEST_LABEL = {
+    "naive_glm": "naive logistic GLM (independence)",
+    "naive_fisher": "naive Fisher exact (independence)",
+    "phyloglm_methanogen": "phylogenetic logistic regression",
+    "phyloglm_confounders": "phylogenetic + confounders (HEADLINE)",
+}
 
-def _load(path, name):
-    if not path or not os.path.exists(path):
-        return None, f"{name} missing"
-    df = pd.read_csv(path, sep="\t")
+
+def load(path, required, numeric=()):
+    """Read a TSV; None if it has no data rows; exit 1 if required columns are missing."""
+    df = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        sys.exit(f"[plot_distribution] {path}: missing required column(s) {missing}")
     if df.empty:
-        return None, f"{name} empty"
-    return df, None
+        return None
+    for c in numeric:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c].replace({"": np.nan, "NA": np.nan}), errors="coerce")
+    return df
 
 
-# ---------------------------------------------------------------------------
-# Prevalence horizontal bar
-# ---------------------------------------------------------------------------
+def direction_sign(direction) -> int:
+    """+1 co-occurrence, -1 exclusion, 0 neutral/ambiguous (label format 'exclusion (OR=0.2)')."""
+    d = str(direction).strip().lower()
+    if d.startswith("co-occurrence") or d.startswith("positive"):
+        return 1
+    if d.startswith("exclusion") or d.startswith("negative"):
+        return -1
+    return 0
 
-def plot_prevalence(prevalence, outdir):
+
+def plot_prevalence(prev, outdir, formats):
     prefix = os.path.join(outdir, "prevalence_by_taxon")
-
-    if prevalence is None:
-        placeholder(prefix, "no data: prevalence_by_taxon.tsv missing or empty")
+    if prev is None:
+        placeholder(prefix, "no data: prevalence_by_taxon.tsv is empty", formats)
         return
-
-    req = {"rank", "taxon", "prevalence", "n_genomes"}
-    if not req.issubset(prevalence.columns):
-        placeholder(prefix, "no data: required columns missing from prevalence file")
-        return
-
-    df = prevalence[prevalence["rank"] == "gtdb_family"].copy()
+    df = prev[(prev["rank"] == "gtdb_family") & np.isfinite(prev["prevalence"]) & (prev["n_genomes"] > 0)]
     if df.empty:
-        placeholder(prefix, "no data: no rows with rank==gtdb_family")
+        placeholder(prefix, "no data: no gtdb_family rows with analysed genomes", formats)
         return
-
-    df = df.sort_values("n_genomes", ascending=False).head(20)
-    df = df.sort_values("prevalence", ascending=True)
-
-    # Wilson CIs
-    ci_low  = df.get("ci_low",  pd.Series(np.zeros(len(df)), index=df.index))
-    ci_high = df.get("ci_high", pd.Series(np.zeros(len(df)), index=df.index))
-    xerr_low  = (df["prevalence"] - ci_low).clip(lower=0)
-    xerr_high = (ci_high - df["prevalence"]).clip(lower=0)
-
-    fig, ax = plt.subplots(figsize=(3.5, max(3.0, len(df) * 0.22)))
+    df = df.sort_values(["n_genomes", "taxon"], ascending=[False, True]).head(20)
+    df = df.sort_values(["prevalence", "taxon"], ascending=[True, True])
+    lo = (df["prevalence"] - df["ci_low"]).clip(lower=0).fillna(0)
+    hi = (df["ci_high"] - df["prevalence"]).clip(lower=0).fillna(0)
+    tier = str(df["tier_set"].iloc[0]) if "tier_set" in df.columns else "?"
+    fig, ax = plt.subplots(figsize=(3.6, max(3.0, len(df) * 0.22)))
     y = np.arange(len(df))
-    ax.barh(y, df["prevalence"].values, height=0.6,
-            color=OKABE_ITO["blue"], alpha=0.8, edgecolor="none")
-    ax.errorbar(df["prevalence"].values, y,
-                xerr=[xerr_low.values, xerr_high.values],
-                fmt="none", color="black", linewidth=0.8, capsize=2)
+    ax.barh(y, df["prevalence"].values, height=0.6, color=OKABE_ITO["blue"], alpha=0.85, edgecolor="none")
+    ax.errorbar(df["prevalence"].values, y, xerr=[lo.values, hi.values], fmt="none",
+                color="black", linewidth=0.8, capsize=2)
     ax.set_yticks(y)
     ax.set_yticklabels(df["taxon"].values, fontsize=5)
-    ax.set_xlabel("Prevalence")
-    ax.set_title("Prometheus prevalence by family (top 20)")
     ax.set_xlim(0, 1)
+    ax.set_xlabel("Prevalence (Wilson 95% CI)")
+    ax.set_title(f"Prometheus prevalence by family (tier {tier}; 20 best-sampled)", fontsize=6)
+    comp = df["median_completeness"] if "median_completeness" in df.columns else pd.Series(np.nan, index=df.index)
+    for yi, (n_g, c) in zip(y, zip(df["n_genomes"], comp)):
+        lab = f"n={int(n_g)}" + (f", {c:.0f}%" if np.isfinite(c) else "")
+        ax.text(1.01, yi, lab, va="center", fontsize=4, transform=ax.get_yaxis_transform())
+    save_fig(fig, prefix, formats)
 
-    for yi, (_, row) in zip(y, df.iterrows()):
-        ax.text(1.01, yi, f"n={int(row['n_genomes'])}", va="center", fontsize=4,
-                transform=ax.get_yaxis_transform())
 
-    save_fig(fig, prefix)
-
-
-# ---------------------------------------------------------------------------
-# Association forest plot
-# ---------------------------------------------------------------------------
-
-def plot_association_forest(tests, outdir):
+def plot_association_forest(tests, outdir, formats):
     prefix = os.path.join(outdir, "association_forest")
-
     if tests is None:
-        placeholder(prefix, "no data: association_tests.tsv missing or empty")
+        placeholder(prefix, "no data: association_tests.tsv is empty", formats)
         return
-
-    req = {"estimate", "term"}
-    if not req.issubset(tests.columns):
-        placeholder(prefix, "no data: estimate/term columns missing")
-        return
-
-    df = tests.dropna(subset=["estimate"]).copy()
+    df = tests[tests["test"].isin(LOGODDS_TESTS) & (tests["term"] == "methanogen")
+               & np.isfinite(tests["estimate"])].copy()
+    others = tests[~tests["test"].isin(LOGODDS_TESTS)]
     if df.empty:
-        placeholder(prefix, "no data: no rows with estimate values")
+        placeholder(prefix, "no data: no finite methanogen log-odds estimate", formats)
         return
-
-    # Build row labels
-    label_parts = []
-    for _, row in df.iterrows():
-        parts = []
-        if "model" in df.columns and pd.notna(row.get("model")):
-            parts.append(str(row["model"]))
-        if "term" in df.columns and pd.notna(row.get("term")):
-            parts.append(str(row["term"]))
-        label_parts.append(" | ".join(parts) if parts else str(_))
-    df["_label"] = label_parts
-
-    ci_low  = df.get("ci_low",  df["estimate"] - df.get("std_error", pd.Series(0, index=df.index)))
-    ci_high = df.get("ci_high", df["estimate"] + df.get("std_error", pd.Series(0, index=df.index)))
-
-    fig, ax = plt.subplots(figsize=(4.5, max(2.5, len(df) * 0.28)))
+    df["_order"] = df["test"].map({t: i for i, t in enumerate(LOGODDS_TESTS)})
+    df = df.sort_values("_order", ascending=False)
+    z = 1.959963984540054
+    lo = df["ci_low"].where(np.isfinite(df["ci_low"]), df["estimate"] - z * df["std_error"])
+    hi = df["ci_high"].where(np.isfinite(df["ci_high"]), df["estimate"] + z * df["std_error"])
+    colors = [OKABE_ITO["grey"] if t.startswith("naive") else OKABE_ITO["blue"] for t in df["test"]]
+    fig, ax = plt.subplots(figsize=(4.6, 1.2 + 0.35 * len(df)))
     y = np.arange(len(df))
-
-    p_vals = df.get("p_value", pd.Series(np.ones(len(df)), index=df.index)).fillna(1.0)
-    sig = p_vals < 0.05
-    colors = [OKABE_ITO["blue"] if s else OKABE_ITO["grey"] for s in sig]
-
-    ax.scatter(df["estimate"].values, y, color=colors, s=14, zorder=4)
-    ax.hlines(y,
-              ci_low.values, ci_high.values,
-              color=colors, linewidth=0.8)
-    ax.axvline(0, color="black", linewidth=0.6, linestyle="--", zorder=2)
+    ax.hlines(y, lo.values, hi.values, color=colors, linewidth=1.0)
+    ax.scatter(df["estimate"].values, y, color=colors, s=[30 if t == "phyloglm_confounders" else 14
+                                                          for t in df["test"]], zorder=4)
+    ax.axvline(0, color="black", linewidth=0.6, linestyle="--", zorder=1)
     ax.set_yticks(y)
-    ax.set_yticklabels(df["_label"].values, fontsize=5)
-    ax.set_xlabel("Estimate (log-odds / statistic)")
-    ax.set_title("Association tests")
+    ax.set_yticklabels([f"{TEST_LABEL[t]}  (n={int(n)}, p={p:.2g})" if np.isfinite(p)
+                        else f"{TEST_LABEL[t]}  (n={int(n)})"
+                        for t, n, p in zip(df["test"], df["n"], df["p_value"])], fontsize=5)
+    ax.set_xlabel("methanogen effect on Prometheus presence (log-odds, 95% CI)")
+    ax.set_title("Methanogen association: naive baselines vs phylogenetic models", fontsize=6)
+    txt = ["grey: assumes independence (baseline); blue: phylogenetically controlled"]
+    for _, r in others.iterrows():
+        if r["test"] == "fitPagel" and np.isfinite(r["p_value"]):
+            txt.append(f"Pagel correlated evolution: LR={r['statistic']:.2f}, p={r['p_value']:.2g}")
+        if r["test"] == "D_statistic" and np.isfinite(r["estimate"]):
+            txt.append(f"Fritz-Purvis D={r['estimate']:.2f} (p vs random={r['p_value']:.2g})")
+    fig.subplots_adjust(bottom=min(0.5, 0.16 + 0.07 * len(txt)))
+    fig.text(0.01, 0.01, "\n".join(txt), fontsize=5, va="bottom", ha="left")
+    save_fig(fig, prefix, formats)
 
-    handles = [mpatches.Patch(color=OKABE_ITO["blue"], label="p<0.05"),
-               mpatches.Patch(color=OKABE_ITO["grey"], label="p≥0.05")]
-    ax.legend(handles=handles, frameon=False, fontsize=6)
-    save_fig(fig, prefix)
 
-
-# ---------------------------------------------------------------------------
-# Co-occurrence heatmap strip
-# ---------------------------------------------------------------------------
-
-def plot_cooccurrence_heatmap(cooc, outdir):
+def plot_cooccurrence_heatmap(cooc, outdir, formats):
     prefix = os.path.join(outdir, "cooccurrence_heatmap")
-
     if cooc is None:
-        placeholder(prefix, "no data: cooccurrence.tsv missing or empty")
+        placeholder(prefix, "no data: cooccurrence.tsv is empty (no testable system)", formats)
         return
-
-    req = {"system_b", "p_adj"}
-    if not req.issubset(cooc.columns):
-        placeholder(prefix, "no data: system_b/p_adj columns missing")
-        return
-
-    df = cooc.dropna(subset=["p_adj"]).copy()
+    df = cooc[np.isfinite(cooc["p_adj"])].copy()
     if df.empty:
-        placeholder(prefix, "no data: no rows with p_adj values")
+        placeholder(prefix, "no data: no rows with p_adj", formats)
         return
-
-    df = df.sort_values("p_adj")
-
-    # Signed -log10(p_adj): sign from direction column
-    log_p = -np.log10(df["p_adj"].clip(lower=1e-300))
-    if "direction" in df.columns:
-        sign = df["direction"].apply(
-            lambda d: -1 if str(d).strip().lower() in ("negative", "exclusion", "-1", "-") else 1)
-    else:
-        sign = pd.Series(np.ones(len(df)), index=df.index)
-
-    signed = (log_p * sign).values.reshape(1, -1)
-    labels = df["system_b"].values
-    sig_mask = df["p_adj"].values < 0.05
-
-    vmax = np.abs(signed).max() if np.abs(signed).max() > 0 else 1.0
+    df = df.sort_values(["p_adj", "system_b"])
+    sign = df["direction"].map(direction_sign).values if "direction" in df.columns else np.ones(len(df))
+    signed = (-np.log10(df["p_adj"].clip(lower=1e-300)).values * sign).reshape(1, -1)
+    vmax = float(np.nanmax(np.abs(signed))) or 1.0
     norm = mcolors.TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
-
-    fig_w = max(3.5, len(labels) * 0.35)
-    fig, ax = plt.subplots(figsize=(fig_w, 1.8))
+    fig, ax = plt.subplots(figsize=(max(3.5, len(df) * 0.35), 1.9))
     im = ax.imshow(signed, aspect="auto", cmap="RdBu_r", norm=norm)
-    ax.set_xticks(range(len(labels)))
-    ax.set_xticklabels(labels, rotation=55, ha="right", fontsize=5)
+    ax.set_xticks(range(len(df)))
+    ax.set_xticklabels(df["system_b"].values, rotation=55, ha="right", fontsize=5)
     ax.set_yticks([])
-    ax.set_title("Prometheus co-occurrence (signed −log10 p_adj)")
-    cbar = fig.colorbar(im, ax=ax, orientation="horizontal", pad=0.3, fraction=0.04)
-    cbar.set_label("signed −log10(p_adj)", fontsize=6)
-
-    # Annotate significant
-    for j, s in enumerate(sig_mask):
-        if s:
-            ax.text(j, 0, "*", ha="center", va="center", fontsize=7, color="white")
-
-    save_fig(fig, prefix)
+    ax.set_title("Prometheus vs other systems: fitPagel, signed by Fisher direction (* BH p_adj<0.05)",
+                 fontsize=6)
+    cbar = fig.colorbar(im, ax=ax, orientation="horizontal", pad=0.35, fraction=0.05)
+    cbar.set_label("signed -log10(p_adj)  (<0 exclusion, >0 co-occurrence)", fontsize=5)
+    for j, p in enumerate(df["p_adj"].values):
+        if p < 0.05:
+            ax.text(j, 0, "*", ha="center", va="center", fontsize=7, color="black")
+    save_fig(fig, prefix, formats)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Distribution figures")
-    parser.add_argument("--prevalence",   required=True, help="distribution/prevalence_by_taxon.tsv")
-    parser.add_argument("--tests",        required=True, help="distribution/association_tests.tsv")
-    parser.add_argument("--cooccurrence", required=True, help="distribution/cooccurrence.tsv")
-    parser.add_argument("--outdir",       required=True, help="Output directory")
-    args = parser.parse_args()
-
+    ap = argparse.ArgumentParser(description="Distribution figures")
+    ap.add_argument("--prevalence", required=True, help="distribution/prevalence_by_taxon.tsv")
+    ap.add_argument("--tests", required=True, help="distribution/association_tests.tsv")
+    ap.add_argument("--cooccurrence", required=True, help="distribution/cooccurrence.tsv")
+    ap.add_argument("--outdir", required=True, help="output directory")
+    ap.add_argument("--formats", default="png,svg", help="comma-separated figure formats (default png,svg)")
+    args = ap.parse_args()
+    formats = tuple(f.strip() for f in args.formats.split(",") if f.strip())
     os.makedirs(args.outdir, exist_ok=True)
-
-    prevalence, _ = _load(args.prevalence,   "prevalence")
-    tests,      _ = _load(args.tests,        "association_tests")
-    cooc,       _ = _load(args.cooccurrence, "cooccurrence")
-
-    plot_prevalence(prevalence, args.outdir)
-    plot_association_forest(tests, args.outdir)
-    plot_cooccurrence_heatmap(cooc, args.outdir)
+    prev = load(args.prevalence, ["rank", "taxon", "n_genomes", "prevalence", "ci_low", "ci_high"],
+                ["n_genomes", "n_present", "prevalence", "ci_low", "ci_high", "median_completeness"])
+    tests = load(args.tests, ["test", "term", "estimate", "std_error", "p_value", "ci_low", "ci_high", "n"],
+                 ["estimate", "std_error", "statistic", "p_value", "ci_low", "ci_high", "n"])
+    cooc = load(args.cooccurrence, ["system_b", "p_adj", "direction"], ["p_value", "p_adj", "statistic"])
+    plot_prevalence(prev, args.outdir, formats)
+    plot_association_forest(tests, args.outdir, formats)
+    plot_cooccurrence_heatmap(cooc, args.outdir, formats)
 
 
 if __name__ == "__main__":

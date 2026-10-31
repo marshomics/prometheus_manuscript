@@ -1,26 +1,51 @@
 """Selection analysis on the Prometheus codon alignment (HyPhy FEL/MEME/BUSTED/aBSREL/RELAX).
 
-Estimates the selection regime on catalytically-intact Prometheus loci (Stage 5.6).
-Diversifying selection concentrated on the nuclease/REase domains would be the
-molecular signature of host-virus conflict; RELAX asks whether that pressure differs
-on methanogen branches.
+Stage 5.6. Diversifying selection concentrated on the nuclease/REase domains would be the
+molecular signature of host-virus conflict; RELAX asks whether selection intensity differs
+on methanogen lineages.
 
-Each HyPhy method is run independently and guarded, so one failure never blocks the
-others or the DAG. RELAX additionally writes a HyPhy-labelled newick that tags
-methanogen tips ``{Test}`` and the rest ``{Reference}`` (methanogen genome set read
-from the master table).
+Verified against HyPhy 2.5.62 (the pinned version) by running every method on a small
+codon alignment (CLI ``hyphy ENV='SetParameter(RANDOM_SEED,<s>,0);' CPU=<n> <method>
+--alignment A --tree T --output J``):
+  * FEL   MLE.headers: alpha, beta, alpha=beta, LRT, p-value, Total branch length
+  * MEME  MLE.headers: &alpha;, &beta;<sup>1</sup>, p<sup>1</sup>, &beta;<sup>+</sup>,
+          p<sup>+</sup>, LRT, p-value, # branches under selection, ... (2.5.103 inserts
+          'LRT MEME vs FEL'), so columns are matched by NORMALISED NAME, never by index
+  * BUSTED 'test results': {LRT, p-value};  aBSREL 'test results': {P-value threshold,
+          positive test results, tested};  RELAX 'test results': {LRT, p-value,
+          relaxation or intensification parameter}
+  * 'data partitions'[i].coverage lists the 0-based codon sites of each partition, used
+    to map MLE rows back to alignment columns (also for GARD-partitioned input)
+  * RELAX classic mode: branches labelled {Test} / {Reference}; every other branch is put
+    in an 'Unclassified' nuisance set with its own omega distribution.
+  * HyPhy seeds its RNG from time+pid (global_things.cpp GlobalStartup); BUSTED's random
+    initial grid made two unseeded 2.5.62 runs on the same data end at different
+    log-likelihoods. The ENV= statement SetParameter(RANDOM_SEED, s, 0) re-seeds it
+    (batchlanruntime.cpp), and seeded runs are bit-identical, so --seed (default 12345) is
+    always passed.
 
-Outputs:
-  selection_summary.tsv  one headline row per method (statistic, value, p, n, note)
-  site_table.tsv         per-site FEL/MEME results mapped to a domain
-
-Guards: run != 'True', <4 codon sequences, or a trivial gene tree -> header-only
-summary + sites. intact-only restricts to catalog catalytic_status=='intact'; if that
-leaves <4 tips, header-only with a note.
+Behaviour:
+  * the analysed set = codon records  ∩  gene-tree tips  [∩ catalytic_status == intact];
+    the gene tree is ALWAYS pruned to that set and written without internal node labels;
+  * RELAX labelling (--relax-labelling): 'clade' (default) labels every branch whose
+    descendant tips are all methanogens Test and all non-methanogens Reference (mixed
+    clades and ANME/unknown hosts Unclassified); 'terminal' labels tip branches only;
+  * site table: one row per codon column; FEL (beta/alpha, p, class) plus MEME columns;
+    domain per column = majority domain over the sequences with a residue there (each
+    sequence's own hmmscan envelope, through utils.domain_intervals);
+  * recombination: every HyPhy test assumes one tree. --gard True runs a GARD screen; when
+    it finds breakpoints FEL/MEME are re-run on the GARD-partitioned alignment and the
+    branch-level tests carry a caveat. Without GARD the limitation is recorded in a
+    'GARD' summary row;
+  * NO SILENT FAILURE: a missing hyphy, a crashed method, an unparsable JSON or a malformed
+    input raises (non-zero exit). Header-only/'not run' outputs only for genuinely empty
+    or too-small inputs, or when run != True.
 """
 import argparse
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,394 +54,397 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import utils
 
 SUMMARY_HEADER = "method\tstatistic\tvalue\tp_value\tn_sites_or_branches\tnote"
-SITES_HEADER = "site\talignment_col\tdomain\tbeta_alpha_or_dnds\tp_value\tclassification"
+SITE_COLS = ["site", "alignment_col", "domain", "beta_alpha_or_dnds", "p_value", "classification",
+             "fel_alpha", "fel_beta", "meme_p_value", "meme_classification", "n_seqs_with_codon",
+             "domain_support"]
+SITES_HEADER = "\t".join(SITE_COLS)
 MIN_TIPS = 4
-SITE_PVAL = 0.1  # default FEL/MEME per-site significance threshold (configurable)
+SITE_PVAL = 0.1
+BRANCH_PVAL = 0.05
+DEFAULT_SEED = 12345
+ALL_METHODS = ("FEL", "MEME", "BUSTED", "aBSREL", "RELAX")
+STATS = {"FEL": "sites_positive", "MEME": "sites_episodic", "BUSTED": "episodic_diversifying_p",
+         "aBSREL": "branches_selected", "RELAX": "K"}
+STOPS = {"TAA", "TAG", "TGA"}
+
+
+class SelectionError(SystemExit):
+    pass
+
+
+def fail(msg):
+    raise SelectionError(f"[run_selection] {msg}")
+
+
+def truthy(s):
+    return str(s).strip().lower() in ("true", "1", "yes", "t")
 
 
 # =========================================================================
-# tree / alignment helpers
+# inputs
 # =========================================================================
-def tree_text(path):
+def read_codon(path):
+    recs = list(utils.read_fasta(path))
+    if not recs:
+        return recs
+    names = [n for n, _ in recs]
+    if len(set(names)) != len(names):
+        fail(f"duplicated ids in {path}")
+    lens = {len(s) for _, s in recs}
+    if len(lens) != 1:
+        fail(f"{path} is not an alignment (record lengths {sorted(lens)[:5]})")
+    L = lens.pop()
+    if L % 3:
+        fail(f"{path}: alignment length {L} is not a multiple of 3")
+    for n, s in recs:
+        s = s.upper()
+        for i in range(0, L, 3):
+            if s[i:i + 3] in STOPS:
+                fail(f"{path}: stop codon in {n} at codon {i // 3 + 1} (HyPhy rejects stop codons)")
+    return [(n, s.upper()) for n, s in recs]
+
+
+def tree_is_trivial(path):
     if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
-        return ""
-    try:
-        with open(path) as fh:
-            return fh.read().strip()
-    except OSError:
-        return ""
-
-
-def is_trivial(path):
-    return tree_text(path) in ("", "();", ";")
+        return True
+    with open(path) as fh:
+        return fh.read().strip() in ("", "();", ";")
 
 
 def load_tree(path):
     import dendropy
-    return dendropy.Tree.get(path=path, schema="newick", preserve_underscores=True)
+    return dendropy.Tree.get(path=path, schema="newick", preserve_underscores=True,
+                             rooting="force-unrooted")
 
 
-def prune_tree_to(tree, keep_labels, out_path):
-    """Retain only `keep_labels` tips; write newick. Returns n retained tips."""
-    keep = set(keep_labels)
-    try:
-        tree.retain_taxa_with_labels(keep)
-    except Exception as e:  # noqa: BLE001
-        utils.log(f"tree prune failed: {e}")
-        return 0
-    n = sum(1 for _ in tree.leaf_node_iter())
-    tree.write(path=out_path, schema="newick", unquoted_underscores=True,
-               suppress_rooting=True)
-    return n
+def clean_newick(tree, tip_label=None, node_label=None):
+    """Newick with tip labels, optional {annotations}, branch lengths; no support values."""
+    def lab(nd):
+        if nd.is_leaf():
+            s = nd.taxon.label if tip_label is None else tip_label(nd)
+        else:
+            s = "" if node_label is None else node_label(nd)
+        bl = nd.edge.length
+        return s + (f":{bl:.10g}" if bl is not None and nd.parent_node is not None else "")
+
+    def rec(nd):
+        if nd.is_leaf():
+            return lab(nd)
+        return "(" + ",".join(rec(c) for c in nd.child_nodes()) + ")" + lab(nd)
+    return rec(tree.seed_node) + ";"
 
 
-# =========================================================================
-# catalog / master-table inputs
-# =========================================================================
+def prune_tree(tree, keep):
+    """Prune to `keep`; return an UNROOTED tree (basal bifurcation collapsed), so every
+    branch -- and every RELAX label -- refers to one branch of the unrooted tree HyPhy fits."""
+    keep = set(keep)
+    tips = {lf.taxon.label for lf in tree.leaf_node_iter()}
+    drop = tips - keep
+    if drop:
+        tree.prune_taxa_with_labels(drop, suppress_unifurcations=True)
+    if len(tree.seed_node.child_nodes()) == 2 and len(keep) > 2:
+        tree.collapse_basal_bifurcation(set_as_unrooted_tree=True)
+    return tree
+
+
 def intact_loci(catalog_path):
-    """Set of locus_ids with catalytic_status == 'intact'."""
-    intact = set()
-    if not catalog_path or not os.path.exists(catalog_path):
-        return intact
-    try:
-        import pandas as pd
-        df = pd.read_csv(catalog_path, sep="\t", dtype=str)
-        if "catalytic_status" in df.columns and "locus_id" in df.columns:
-            sub = df[df["catalytic_status"].astype(str).str.lower() == "intact"]
-            intact = set(sub["locus_id"].astype(str))
-    except Exception as e:  # noqa: BLE001
-        utils.log(f"could not read catalog: {e}")
-    return intact
+    import pandas as pd
+    df = pd.read_csv(catalog_path, sep="\t", dtype=str, keep_default_na=False)
+    for c in ("locus_id", "catalytic_status"):
+        if c not in df.columns:
+            fail(f"catalog {catalog_path} lacks column '{c}' (SCHEMA prometheus_catalog.tsv)")
+    return set(df.loc[df["catalytic_status"].str.strip().str.lower() == "intact", "locus_id"].str.strip())
 
 
-def methanogen_genomes(master_path):
-    """Set of genome_ids flagged methanogen==True in the master table."""
-    mg = set()
-    if not master_path or not os.path.exists(master_path):
-        return mg
-    try:
-        import pandas as pd
-        df = pd.read_csv(master_path, sep="\t", dtype=str)
-        if "methanogen" in df.columns and "genome_id" in df.columns:
-            sub = df[df["methanogen"].astype(str).str.lower().isin(("true", "1", "yes"))]
-            mg = set(sub["genome_id"].astype(str))
-    except Exception as e:  # noqa: BLE001
-        utils.log(f"could not read master table: {e}")
-    return mg
+# mcr_group values (scaffolds/methanogen_calls) whose host is neither a confident methanogen
+# nor a confident non-methanogen: kept out of both RELAX sets (Unclassified nuisance set).
+UNCERTAIN_MCR = {"anme", "ambiguous", "unplaced", "not_placed"}
+
+
+def host_states(master_path):
+    """genome_id -> 'M' (methanogen), 'N' (non-methanogen) or 'U' (unclassified).
+
+    M: methanogen == True (mcrA-defined). U: ANME (methanotrophs with MCR), mcr hosts whose
+    McrA placement is ambiguous/unplaced/not_placed, or an unparsable methanogen value.
+    N: everything else with methanogen == False -- no mcrA, or mcr_group 'other' (MCR-like
+    alkane oxidisers, not methanogens).
+    """
+    import pandas as pd
+    df = pd.read_csv(master_path, sep="\t", dtype=str, keep_default_na=False)
+    for c in ("genome_id", "methanogen"):
+        if c not in df.columns:
+            fail(f"master table {master_path} lacks column '{c}'")
+    out = {}
+    for _, r in df.iterrows():
+        g = str(r["genome_id"]).strip()
+        m = str(r["methanogen"]).strip().lower()
+        grp = str(r.get("mcr_group", "")).strip().lower()
+        anme = str(r.get("is_anme", "")).strip().lower() in ("true", "1", "yes", "t")
+        if m in ("true", "1", "yes", "t"):
+            out[g] = "M"
+        elif anme or grp in UNCERTAIN_MCR or m not in ("false", "0", "no", "f"):
+            out[g] = "U"
+        else:
+            out[g] = "N"
+    return out
 
 
 # =========================================================================
-# HyPhy runners
+# HyPhy
 # =========================================================================
-def hyphy_path():
-    return shutil.which("hyphy") or shutil.which("HYPHYMP")
+def hyphy_bin():
+    h = shutil.which("hyphy") or shutil.which("HYPHYMP")
+    if h is None:
+        fail("hyphy not found on PATH (selection.run is True)")
+    return h
 
 
-def run_hyphy(method, codon, tree, out_json, extra=None):
-    """Run one HyPhy analysis; return True on success (output JSON present)."""
-    hyphy = hyphy_path()
-    if hyphy is None:
-        utils.log(f"[{method}] hyphy not on PATH; skipping")
-        return False
-    cmd = [hyphy, method, "--alignment", os.path.abspath(codon),
-           "--tree", os.path.abspath(tree), "--output", os.path.abspath(out_json)]
-    if extra:
-        cmd += extra
-    utils.log(f"[{method}] running: " + " ".join(cmd))
-    try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        if proc.returncode != 0:
-            err = proc.stderr.decode(errors="replace").strip()
-            utils.log(f"[{method}] exit {proc.returncode}: {err[:500]}")
-            return False
-    except Exception as e:  # noqa: BLE001
-        utils.log(f"[{method}] failed: {e}")
-        return False
+def run_hyphy(method, aln, tree, out_json, threads, extra=None, log_path=None, seed=None):
+    cmd = [hyphy_bin()]
+    if seed is not None:
+        cmd.append(f"ENV=SetParameter(RANDOM_SEED,{int(seed)},0);")
+    cmd += [f"CPU={max(1, int(threads))}", method, "--alignment", os.path.abspath(aln)]
+    if tree:
+        cmd += ["--tree", os.path.abspath(tree)]
+    cmd += ["--output", os.path.abspath(out_json)] + list(extra or [])
+    utils.log(f"[{method}] " + " ".join(cmd))
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if log_path:
+        with open(log_path, "w") as fh:
+            fh.write(proc.stdout)
+    if proc.returncode != 0:
+        fail(f"hyphy {method} exited {proc.returncode}: {proc.stdout[-1500:]}")
     if not (os.path.exists(out_json) and os.path.getsize(out_json) > 0):
-        utils.log(f"[{method}] produced no JSON output")
-        return False
-    return True
-
-
-def load_json(path):
+        fail(f"hyphy {method} wrote no JSON ({out_json}): {proc.stdout[-1500:]}")
     try:
-        with open(path) as fh:
+        with open(out_json) as fh:
             return json.load(fh)
-    except Exception as e:  # noqa: BLE001
-        utils.log(f"could not parse JSON {path}: {e}")
-        return None
+    except json.JSONDecodeError as e:
+        fail(f"hyphy {method} JSON {out_json} is not valid JSON: {e}")
 
 
-# ---- per-method JSON parsing ------------------------------------------------
-def _mle_rows(js):
-    """Return (headers, rows) from a HyPhy MLE content block (FEL/MEME)."""
-    content = js.get("MLE", {}).get("content", {})
-    headers = js.get("MLE", {}).get("headers", [])
-    # content is keyed by partition index ('0', '1', ...); concatenate partitions
-    rows = []
-    for _k, part in sorted(content.items()):
-        if isinstance(part, list):
-            rows.extend(part)
-    # headers are [[name, description], ...]
-    hdr_names = [h[0] if isinstance(h, (list, tuple)) else str(h) for h in headers]
-    return hdr_names, rows
+def _norm(h):
+    """'&beta;<sup>+</sup>' -> 'beta+', 'p-value' -> 'p-value', 'alpha=beta' kept."""
+    h = re.sub(r"</?sup>", "", str(h))
+    h = re.sub(r"&([a-zA-Z]+);", r"\1", h)
+    return h.strip().lower()
 
 
-def _col_idx(hdr_names, *candidates):
-    low = [h.lower() for h in hdr_names]
-    for cand in candidates:
-        c = cand.lower()
-        for i, h in enumerate(low):
-            if h == c:
-                return i
-        for i, h in enumerate(low):
-            if c in h:
-                return i
-    return None
+def mle_table(js, method):
+    """[(alignment_site_0based, {normalised_header: value})] from an MLE block."""
+    mle = js.get("MLE")
+    if not isinstance(mle, dict) or "headers" not in mle or "content" not in mle:
+        fail(f"{method} JSON has no MLE headers/content block")
+    hdr = [_norm(h[0] if isinstance(h, (list, tuple)) else h) for h in mle["headers"]]
+    parts = js.get("data partitions", {}) or {}
+    out = []
+    for key in sorted(mle["content"], key=lambda k: int(k)):
+        rows = mle["content"][key]
+        cov = parts.get(str(key), {}).get("coverage")
+        sites = cov[0] if (isinstance(cov, list) and cov and isinstance(cov[0], list)) else None
+        if sites is not None and len(sites) != len(rows):
+            fail(f"{method}: partition {key} has {len(rows)} MLE rows but {len(sites)} covered sites")
+        if sites is None:
+            if len(mle["content"]) > 1:
+                fail(f"{method}: multi-partition MLE without 'data partitions' coverage")
+            sites = list(range(len(rows)))
+        for s, r in zip(sites, rows):
+            if len(r) != len(hdr):
+                fail(f"{method}: MLE row width {len(r)} != {len(hdr)} headers")
+            out.append((int(s), dict(zip(hdr, r))))
+    return out
 
 
-def parse_fel(path, site_pval=SITE_PVAL):
-    """FEL: per-site alpha/beta + p-value. Return (n_pos_sites, site_records)."""
-    js = load_json(path)
-    if not js:
-        return None, []
-    hdr, rows = _mle_rows(js)
-    i_alpha = _col_idx(hdr, "alpha")
-    i_beta = _col_idx(hdr, "beta")
-    i_p = _col_idx(hdr, "p-value", "p_value", "pvalue")
-    sites = []
-    n_pos = 0
-    for idx, r in enumerate(rows, start=1):
-        try:
-            alpha = float(r[i_alpha]) if i_alpha is not None else float("nan")
-            beta = float(r[i_beta]) if i_beta is not None else float("nan")
-            pval = float(r[i_p]) if i_p is not None else float("nan")
-        except (TypeError, ValueError, IndexError):
-            continue
-        # beta>alpha => positive (diversifying); beta<alpha => negative (purifying)
-        if pval <= site_pval and beta > alpha:
+def fnum(v):
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return float("nan")
+    return x
+
+
+def need(d, key, method):
+    if key not in d:
+        fail(f"{method}: expected column '{key}' not in MLE headers {sorted(d)}")
+    return fnum(d[key])
+
+
+def parse_fel(js, site_p):
+    rows = {}
+    for s, d in mle_table(js, "FEL"):
+        a, b, p = need(d, "alpha", "FEL"), need(d, "beta", "FEL"), need(d, "p-value", "FEL")
+        if p <= site_p and b > a:
             cls = "positive"
-        elif pval <= site_pval and beta < alpha:
+        elif p <= site_p and b < a:
             cls = "negative"
         else:
             cls = "neutral"
-        if cls == "positive":
-            n_pos += 1
-        ratio = (beta / alpha) if (alpha and alpha > 0) else ""
-        sites.append({"site": idx, "stat": (round(ratio, 4) if ratio != "" else ""),
-                      "p": pval, "class": cls})
-    return n_pos, sites
-
-
-def parse_meme(path, site_pval=SITE_PVAL):
-    """MEME: per-site episodic positive selection p-value. Return (n_pos, sites)."""
-    js = load_json(path)
-    if not js:
-        return None, []
-    hdr, rows = _mle_rows(js)
-    i_p = _col_idx(hdr, "p-value", "p_value", "pvalue")
-    i_beta_plus = _col_idx(hdr, "beta+", "&beta;+", "beta (positive)")
-    i_alpha = _col_idx(hdr, "alpha")
-    sites = []
-    n_pos = 0
-    for idx, r in enumerate(rows, start=1):
-        try:
-            pval = float(r[i_p]) if i_p is not None else float("nan")
-        except (TypeError, ValueError, IndexError):
-            continue
-        cls = "positive" if pval <= site_pval else "neutral"
-        if cls == "positive":
-            n_pos += 1
-        stat = ""
-        try:
-            if i_beta_plus is not None and i_alpha is not None:
-                bp = float(r[i_beta_plus]); a = float(r[i_alpha])
-                stat = round(bp / a, 4) if a > 0 else ""
-        except (TypeError, ValueError, IndexError):
-            stat = ""
-        sites.append({"site": idx, "stat": stat, "p": pval, "class": cls})
-    return n_pos, sites
-
-
-def parse_busted(path):
-    """BUSTED: gene-wide test p-value for episodic diversifying selection."""
-    js = load_json(path)
-    if not js:
-        return None
-    tr = js.get("test results", {}) or js.get("test_results", {})
-    p = tr.get("p-value", tr.get("p_value"))
-    try:
-        return float(p)
-    except (TypeError, ValueError):
-        return None
-
-
-def parse_absrel(path):
-    """aBSREL: number of branches under selection (corrected p <= 0.05)."""
-    js = load_json(path)
-    if not js:
-        return None
-    n = js.get("test results", {}).get("positive test results")
-    if isinstance(n, (int, float)):
-        return int(n)
-    # fall back: count branch attributes with corrected p <= 0.05
-    count = 0
-    found = False
-    battr = js.get("branch attributes", {}).get("0", {})
-    for _b, d in battr.items():
-        if not isinstance(d, dict):
-            continue
-        p = d.get("Corrected P-value", d.get("Corrected P-value "))
-        if p is None:
-            continue
-        found = True
-        try:
-            if float(p) <= 0.05:
-                count += 1
-        except (TypeError, ValueError):
-            pass
-    return count if found else None
-
-
-def parse_relax(path):
-    """RELAX: selection-intensity K and the LRT p-value."""
-    js = load_json(path)
-    if not js:
-        return None, None
-    tr = js.get("test results", {})
-    p = tr.get("p-value", tr.get("p_value"))
-    k = tr.get("relaxation or intensification parameter", tr.get("k"))
-    try:
-        p = float(p)
-    except (TypeError, ValueError):
-        p = None
-    try:
-        k = float(k)
-    except (TypeError, ValueError):
-        k = None
-    return k, p
-
-
-# =========================================================================
-# RELAX branch labelling
-# =========================================================================
-def write_relax_labelled(gene_tree_path, methanogens, out_path):
-    """Write a newick where methanogen TIPS are name{Test}, others name{Reference}.
-
-    Only leaf branches are labelled: a gene tip is Test when its genome is a methanogen.
-    Internal branches (including methanogen-clade stems) are left unlabelled, so RELAX
-    contrasts selection intensity on TERMINAL methanogen lineages against the rest -- it
-    does not test whole methanogen clades (that would need ancestral reconstruction to
-    assign internal branches). Returns (n_test, n_reference). Uses HyPhy node-label
-    syntax (label in braces after the taxon name). Falls back to no labelling on failure.
-    """
-    try:
-        t = load_tree(gene_tree_path)
-    except Exception as e:  # noqa: BLE001
-        utils.log(f"RELAX: could not load gene tree: {e}")
-        return 0, 0
-    n_test = n_ref = 0
-    for leaf in t.leaf_node_iter():
-        if leaf.taxon is None:
-            continue
-        label = leaf.taxon.label
-        genome = utils.genome_of(label)
-        tag = "Test" if genome in methanogens else "Reference"
-        if tag == "Test":
-            n_test += 1
+        if a > 0:
+            ratio = b / a
+        elif b > 0:
+            ratio = float("inf")     # beta > 0 with alpha = 0: dN/dS unbounded
         else:
-            n_ref += 1
-        leaf.taxon.label = f"{label}{{{tag}}}"
-    # write with underscores preserved; braces must survive, so don't quote
-    newick = t.as_string(schema="newick", unquoted_underscores=True,
-                         suppress_rooting=True)
-    # dendropy may quote labels containing '{'; strip the surrounding quotes.
-    newick = newick.replace("'", "")
-    with open(out_path, "w") as out:
-        out.write(newick.strip() + "\n")
-    return n_test, n_ref
+            ratio = float("nan")     # invariant / no information
+        rows[s] = {"alpha": a, "beta": b, "p": p, "ratio": ratio, "class": cls}
+    return rows
+
+
+def parse_meme(js, site_p):
+    rows = {}
+    for s, d in mle_table(js, "MEME"):
+        p = need(d, "p-value", "MEME")
+        rows[s] = {"p": p, "class": "episodic" if p <= site_p else "neutral",
+                   "beta_plus": fnum(d.get("beta+")), "alpha": fnum(d.get("alpha"))}
+    return rows
+
+
+def test_results(js, method, keys):
+    tr = js.get("test results")
+    if not isinstance(tr, dict):
+        fail(f"{method} JSON has no 'test results' block")
+    out = {}
+    for k in keys:
+        if k not in tr:
+            fail(f"{method} 'test results' lacks '{k}' (has {sorted(tr)})")
+        out[k] = fnum(tr[k])
+    return out
+
+
+def n_branches(js):
+    try:
+        return sum(1 for _ in js["branch attributes"]["0"])
+    except (KeyError, TypeError):
+        return ""
 
 
 # =========================================================================
-# site -> domain mapping
+# RELAX labelling
 # =========================================================================
-def _matches_domain(hit, names, accs):
-    dom = str(hit.get("domain", "")).lower()
-    acc = str(hit.get("accession", ""))
-    acc_base = acc.split(".")[0]
-    if accs and (acc in accs or acc_base in accs):
-        return True
-    for nm in names:
-        if nm and nm.lower() in dom:
-            return True
-    return False
+def relax_labels(tree, states, mode):
+    """Assign 'Test' / 'Reference' to branches (keyed by the node BELOW the branch).
 
-
-def build_codon_domain_map(codon_records, domains, hits):
-    """Approximate map: codon alignment column -> domain.
-
-    Approximation (documented): take the reference (longest un-gapped) codon-aligned
-    sequence; walk its alignment columns; for each ungapped codon, advance a residue
-    counter and look up which domain (if any) covers that residue in the reference
-    protein's domtbl ranges. Project that residue->domain assignment onto the
-    alignment column. Columns where the reference is gapped, or no domain covers the
-    residue, are 'NA'. This uses a single reference sequence as the coordinate frame
-    rather than a per-column majority vote, which is a coarse but transparent proxy.
-
-    Returns dict {alignment_col (1-based) -> domain_name}.
+    states: tip label -> 'M' | 'N' | 'U'. The tree is unrooted (basal bifurcation collapsed),
+    so a branch is a bipartition of the tips and the rule must not depend on where the
+    arbitrary newick root sits:
+      'clade'    Test if one side of the branch is all-M (the branch lies inside, or leads
+                 to, a methanogen-only group), Reference if one side is all-N; a branch with
+                 an all-M side AND an all-N side (the single transition branch) and every
+                 other branch stay unlabelled (RELAX 'Unclassified' nuisance set);
+      'terminal' tip branches only, by the host state of the tip.
     """
-    col_domain = {}
-    if not codon_records:
-        return col_domain
-    # choose reference = record with the most non-gap characters
-    ref_id, ref_seq = max(codon_records, key=lambda kv: sum(c not in "-." for c in kv[1]))
-    ref_hits = hits.get(ref_id, [])
-    if not ref_hits:
-        utils.log(f"site->domain: reference {ref_id} has no domtbl hits; all NA")
-        return col_domain
+    all_states = [states.get(lf.taxon.label, "U") for lf in tree.leaf_node_iter()]
+    total = {}
+    for st in all_states:
+        total[st] = total.get(st, 0) + 1
+    desc = {}
+    lab = {}
+    for nd in tree.postorder_node_iter():
+        if nd.is_leaf():
+            cnt = {states.get(nd.taxon.label, "U"): 1}
+        else:
+            cnt = {}
+            for ch in nd.child_nodes():
+                for k, v in desc[ch].items():
+                    cnt[k] = cnt.get(k, 0) + v
+        desc[nd] = cnt
+        if nd.parent_node is None or (mode == "terminal" and not nd.is_leaf()):
+            continue
+        other = {k: total[k] - cnt.get(k, 0) for k in total if total[k] - cnt.get(k, 0) > 0}
+        sides = (set(cnt), set(other))
+        is_m = {"M"} in sides
+        is_n = {"N"} in sides
+        if is_m and not is_n:
+            lab[nd] = "Test"
+        elif is_n and not is_m:
+            lab[nd] = "Reference"
+    return lab
 
-    # build residue(1-based aa) -> domain for the reference protein
-    res_domain = {}
-    for dname, spec in domains.items():
-        spec = spec or {}
-        names = spec.get("names", [])
-        accs = set(spec.get("accessions", []))
-        for h in ref_hits:
-            if _matches_domain(h, names, accs):
-                for r in range(int(h["start"]), int(h["end"]) + 1):
-                    res_domain.setdefault(r, dname)
 
-    if not res_domain:
-        return col_domain
+# =========================================================================
+# site -> domain
+# =========================================================================
+def column_domains(records, hits, spec):
+    """codon column (0-based) -> (majority domain or 'NA', support fraction, n residues)."""
+    from collections import Counter
+    L = len(records[0][1]) // 3 if records else 0
+    votes = [Counter() for _ in range(L)]
+    cover = [0] * L
+    for name, seq in records:
+        env = [dict(h, start=h.get("env_from", h["start"]), end=h.get("env_to", h["end"]))
+               for h in hits.get(name, [])]
+        ivs = utils.domain_intervals(env, spec)
+        res_dom = {}
+        for cat, spans in ivs.items():
+            for a, b in spans:
+                for r in range(a, b + 1):
+                    res_dom.setdefault(r, cat)
+        aa = 0
+        for c in range(L):
+            cod = seq[3 * c:3 * c + 3]
+            if set(cod) <= set("-."):
+                continue          # gap codon (an NNN codon is still a residue)
+            aa += 1
+            cover[c] += 1
+            votes[c][res_dom.get(aa, "NA")] += 1
+    out = []
+    for c in range(L):
+        if not cover[c]:
+            out.append(("NA", "", 0))
+            continue
+        dom, n = votes[c].most_common(1)[0]
+        frac = n / cover[c]
+        out.append((dom if (dom != "NA" and frac >= 0.5) else "NA", round(frac, 4), cover[c]))
+    return out
 
-    # walk codon-alignment columns; each codon = 3 nt; ungapped codons advance aa idx
-    aa_idx = 0
-    n = len(ref_seq)
-    col = 0
-    i = 0
-    while i < n:
-        codon = ref_seq[i:i + 3]
-        col += 1
-        is_gap = all(c in "-." for c in codon)
-        if not is_gap:
-            aa_idx += 1
-            dom = res_domain.get(aa_idx)
-            if dom:
-                col_domain[col] = dom
-        i += 3
-    return col_domain
+
+# =========================================================================
+# GARD
+# =========================================================================
+def run_gard(codon_path, workdir, threads, mode, seed=None):
+    out_json = os.path.join(workdir, "GARD.json")
+    best = os.path.join(workdir, "GARD.best-gard")
+    js = run_hyphy("gard", codon_path, None, out_json, threads,
+                   extra=["--type", "codon", "--mode", mode, "--output-lf", best],
+                   log_path=os.path.join(workdir, "GARD.log"), seed=seed)
+    bp = js.get("breakpointData")
+    if not isinstance(bp, dict) or not bp:
+        fail("GARD JSON has no breakpointData")
+    n_bp = len(bp) - 1
+    single, bestaic = fnum(js.get("singleTreeAICc")), fnum(js.get("bestModelAICc"))
+    return n_bp, single - bestaic, (best if n_bp > 0 and os.path.exists(best) else None)
 
 
 # =========================================================================
 # main
 # =========================================================================
-def write_headers(summary_path, sites_path):
-    utils.write_empty(summary_path, SUMMARY_HEADER)
-    utils.write_empty(sites_path, SITES_HEADER)
+def write_outputs(summary_rows, site_rows, args):
+    with open(args.out_summary, "w") as out:
+        out.write(SUMMARY_HEADER + "\n")
+        for r in summary_rows:
+            out.write("\t".join("" if v is None else str(v) for v in r) + "\n")
+    with open(args.out_sites, "w") as out:
+        out.write(SITES_HEADER + "\n")
+        for r in site_rows:
+            out.write("\t".join("" if r.get(c) is None else str(r.get(c)) for c in SITE_COLS) + "\n")
+
+
+def fmt(x, nd=6):
+    if x is None or (isinstance(x, float) and (math.isnan(x))):
+        return ""
+    if isinstance(x, float) and math.isinf(x):
+        return "inf"
+    return round(x, nd) if isinstance(x, float) else x
+
+
+def not_run(methods, reason, gard_row=True):
+    rows = [(m, STATS[m], "", "", "", f"not run: {reason}") for m in methods]
+    if gard_row:
+        rows.append(("GARD", "breakpoints", "", "", "", f"not run: {reason}"))
+    return rows
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--codon", required=True)
     ap.add_argument("--gene-tree", required=True)
     ap.add_argument("--catalog", required=True)
@@ -424,12 +452,18 @@ def main():
     ap.add_argument("--domtbl", required=True)
     ap.add_argument("--domains", required=True)
     ap.add_argument("--methods", required=True, help="comma list: FEL,MEME,BUSTED,aBSREL,RELAX")
-    ap.add_argument("--relax-partition", default="methanogen")
+    ap.add_argument("--relax-partition", default="methanogen", help="methanogen | none")
+    ap.add_argument("--relax-labelling", default="clade", choices=("clade", "terminal"))
     ap.add_argument("--intact-only", default="True")
-    ap.add_argument("--site-pvalue", type=float, default=SITE_PVAL,
-                    help="FEL/MEME per-site significance threshold (default 0.1)")
+    ap.add_argument("--site-pvalue", type=float, default=SITE_PVAL)
+    ap.add_argument("--branch-pvalue", type=float, default=BRANCH_PVAL,
+                    help="aBSREL corrected-p threshold (HyPhy default 0.05)")
+    ap.add_argument("--gard", default="False", help="True: GARD recombination screen first")
+    ap.add_argument("--gard-mode", default="Faster", choices=("Faster", "Normal"))
     ap.add_argument("--run", default="True")
     ap.add_argument("--threads", type=int, default=1)
+    ap.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                    help="HyPhy RNG seed (SetParameter(RANDOM_SEED)); default 12345")
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--out-summary", required=True)
     ap.add_argument("--out-sites", required=True)
@@ -438,178 +472,162 @@ def main():
     os.makedirs(args.workdir, exist_ok=True)
     for p in (args.out_summary, args.out_sites):
         os.makedirs(os.path.dirname(os.path.abspath(p)), exist_ok=True)
-
-    # ---- top-level guards ----
-    if str(args.run) != "True":
-        write_headers(args.out_summary, args.out_sites)
-        utils.log("run != True; header-only outputs")
-        return
-
-    codon_records = list(utils.read_fasta(args.codon))
-    if len(codon_records) < MIN_TIPS or is_trivial(args.gene_tree):
-        write_headers(args.out_summary, args.out_sites)
-        utils.log(f"too few codon seqs ({len(codon_records)}) or trivial gene tree; "
-                  "header-only outputs")
-        return
-
-    try:
-        domains = json.loads(args.domains) if args.domains else {}
-    except json.JSONDecodeError:
-        domains = {}
-    hits = utils.parse_domtbl(args.domtbl)
-
-    # ---- intact-only restriction ----
-    codon_path = os.path.abspath(args.codon)
-    tree_path = os.path.abspath(args.gene_tree)
-    if str(args.intact_only) == "True":
-        intact = intact_loci(args.catalog)
-        if intact:
-            kept = [(n, s) for n, s in codon_records if n in intact]
-            if len(kept) < MIN_TIPS:
-                write_headers(args.out_summary, args.out_sites)
-                utils.log(f"intact-only left {len(kept)} loci (<{MIN_TIPS}); "
-                          "header-only outputs")
-                return
-            codon_path = os.path.join(args.workdir, "codon.intact.fasta")
-            utils.write_fasta(kept, codon_path)
-            codon_records = kept
-            # prune the gene tree to the intact tips
-            try:
-                tr = load_tree(args.gene_tree)
-                tree_path = os.path.join(args.workdir, "gene.intact.nwk")
-                n_kept = prune_tree_to(tr, [n for n, _ in kept], tree_path)
-                if n_kept < MIN_TIPS:
-                    write_headers(args.out_summary, args.out_sites)
-                    utils.log(f"intact-only tree has {n_kept} tips (<{MIN_TIPS}); "
-                              "header-only outputs")
-                    return
-            except Exception as e:  # noqa: BLE001
-                utils.log(f"could not prune gene tree to intact tips: {e}; "
-                          "using full gene tree")
-                tree_path = os.path.abspath(args.gene_tree)
-        else:
-            utils.log("intact-only requested but no intact loci in catalog; "
-                      "using all loci")
-
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
-    summary_rows = []
-    fel_sites, meme_sites = [], []
+    bad = [m for m in methods if m not in ALL_METHODS]
+    if bad:
+        fail(f"unknown method(s) {bad}; allowed {ALL_METHODS}")
 
-    site_pval = float(args.site_pvalue)
+    if not truthy(args.run):
+        write_outputs(not_run(methods, "evolution.selection.run disabled"), [], args)
+        utils.log("selection disabled; 'not run' rows written")
+        return
+    records = read_codon(args.codon)
+    if len(records) < MIN_TIPS or tree_is_trivial(args.gene_tree):
+        write_outputs(not_run(methods, f"too few codon sequences ({len(records)}) or trivial gene tree"),
+                      [], args)
+        utils.log("too few sequences / trivial tree; 'not run' rows written")
+        return
 
-    # ---- FEL ----
-    if "FEL" in methods:
-        out = os.path.join(args.workdir, "FEL.json")
-        if run_hyphy("fel", codon_path, tree_path, out):
-            n_pos, sites = parse_fel(out, site_pval)
-            fel_sites = sites
-            if n_pos is None:
-                summary_rows.append(("FEL", "sites_positive", "", "", "", "ran; unparsed JSON"))
-            else:
-                summary_rows.append(("FEL", "sites_positive", n_pos, "", n_pos,
-                                     f"p<={site_pval}, beta>alpha"))
+    spec = utils.load_domain_spec(args.domains)
+    hits = utils.parse_domtbl(args.domtbl)
+    tree = load_tree(args.gene_tree)
+    tips = {lf.taxon.label for lf in tree.leaf_node_iter()}
+    keep = [n for n, _ in records if n in tips]
+    notes = []
+    extra_tips = tips - {n for n, _ in records}
+    if extra_tips:                       # e.g. reference/paralog tips, or loci without a CDS
+        notes.append(f"{len(extra_tips)} gene-tree tip(s) without a codon record pruned")
+    if len(keep) < len(records):
+        notes.append(f"{len(records) - len(keep)} codon record(s) absent from the gene tree dropped")
+    if truthy(args.intact_only):
+        intact = intact_loci(args.catalog)
+        n0 = len(keep)
+        keep = [n for n in keep if n in intact]
+        notes.append(f"intact-only: {len(keep)}/{n0} loci catalytically intact")
+    if len(keep) < MIN_TIPS:
+        write_outputs(not_run(methods, f"only {len(keep)} analysable loci (<{MIN_TIPS}); "
+                              + "; ".join(notes)), [], args)
+        utils.log(f"only {len(keep)} analysable loci; 'not run' rows written")
+        return
+    keep_set = set(keep)
+    records = [(n, s) for n, s in records if n in keep_set]
+    codon_path = os.path.join(args.workdir, "codon.analysed.fasta")
+    utils.write_fasta(records, codon_path)
+    tree = prune_tree(tree, keep_set)
+    tree_path = os.path.join(args.workdir, "gene.analysed.nwk")
+    with open(tree_path, "w") as fh:
+        fh.write(clean_newick(tree) + "\n")
+    base_note = f"n={len(records)} loci x {len(records[0][1]) // 3} codons; " + "; ".join(notes)
+    site_p = float(args.site_pvalue)
+
+    # ---- recombination screen -------------------------------------------------
+    summary, site_aln = [], codon_path
+    rec_caveat = "assumes no recombination (single tree; GARD not run)"
+    if truthy(args.gard):
+        n_bp, d_aic, best = run_gard(codon_path, args.workdir, args.threads, args.gard_mode, seed=args.seed)
+        summary.append(("GARD", "breakpoints", n_bp, "", len(records[0][1]) // 3,
+                        f"GARD {args.gard_mode} codon screen; dAICc(single tree - best)={fmt(d_aic, 3)}"))
+        if n_bp > 0:
+            site_aln = best
+            rec_caveat = (f"GARD found {n_bp} breakpoint(s): FEL/MEME use the GARD partitions; "
+                          "this branch-level test uses one tree and may be biased")
         else:
-            summary_rows.append(("FEL", "sites_positive", "", "", "", "skipped/failed"))
-
-    # ---- MEME ----
-    if "MEME" in methods:
-        out = os.path.join(args.workdir, "MEME.json")
-        if run_hyphy("meme", codon_path, tree_path, out):
-            n_pos, sites = parse_meme(out, site_pval)
-            meme_sites = sites
-            if n_pos is None:
-                summary_rows.append(("MEME", "sites_episodic", "", "", "", "ran; unparsed JSON"))
-            else:
-                summary_rows.append(("MEME", "sites_episodic", n_pos, "", n_pos,
-                                     f"p<={site_pval}"))
-        else:
-            summary_rows.append(("MEME", "sites_episodic", "", "", "", "skipped/failed"))
-
-    # ---- BUSTED ----
-    if "BUSTED" in methods:
-        out = os.path.join(args.workdir, "BUSTED.json")
-        if run_hyphy("busted", codon_path, tree_path, out):
-            p = parse_busted(out)
-            summary_rows.append(("BUSTED", "episodic_diversifying_p",
-                                 (round(p, 6) if p is not None else ""),
-                                 (round(p, 6) if p is not None else ""), "",
-                                 "gene-wide test"))
-        else:
-            summary_rows.append(("BUSTED", "episodic_diversifying_p", "", "", "",
-                                 "skipped/failed"))
-
-    # ---- aBSREL ----
-    if "aBSREL" in methods:
-        out = os.path.join(args.workdir, "aBSREL.json")
-        if run_hyphy("absrel", codon_path, tree_path, out):
-            n = parse_absrel(out)
-            summary_rows.append(("aBSREL", "branches_selected",
-                                 (n if n is not None else ""), "",
-                                 (n if n is not None else ""),
-                                 "corrected p<=0.05"))
-        else:
-            summary_rows.append(("aBSREL", "branches_selected", "", "", "",
-                                 "skipped/failed"))
-
-    # ---- RELAX (methanogen Test vs Reference) ----
-    if "RELAX" in methods:
-        if args.relax_partition == "methanogen":
-            mg = methanogen_genomes(args.master)
-            labelled = os.path.join(args.workdir, "relax.labelled.nwk")
-            n_test, n_ref = write_relax_labelled(tree_path, mg, labelled)
-            if n_test < 1 or n_ref < 1:
-                summary_rows.append(("RELAX", "K", "", "", "",
-                                     f"no valid Test/Reference split "
-                                     f"(Test={n_test}, Reference={n_ref})"))
-            else:
-                out = os.path.join(args.workdir, "RELAX.json")
-                if run_hyphy("relax", codon_path, labelled, out,
-                             extra=["--test", "Test", "--reference", "Reference"]):
-                    k, p = parse_relax(out)
-                    summary_rows.append(("RELAX", "K",
-                                         (round(k, 4) if k is not None else ""),
-                                         (round(p, 6) if p is not None else ""), "",
-                                         f"Test={n_test} terminal methanogen branches, "
-                                         f"Reference={n_ref}; internal branches unlabelled "
-                                         f"(K>1 intensified, K<1 relaxed on methanogen tips)"))
-                else:
-                    summary_rows.append(("RELAX", "K", "", "", "", "skipped/failed"))
-        else:
-            summary_rows.append(("RELAX", "K", "", "", "",
-                                 f"unsupported relax-partition '{args.relax_partition}'"))
-
-    # ---- write summary ----
-    with open(args.out_summary, "w") as out:
-        out.write(SUMMARY_HEADER + "\n")
-        for method, stat, val, p, n, note in summary_rows:
-            out.write(f"{method}\t{stat}\t{val}\t{p}\t{n}\t{note}\n")
-
-    # ---- site table (FEL preferred; fall back to MEME) ----
-    site_source = None
-    site_records = []
-    if fel_sites:
-        site_source, site_records = "FEL", fel_sites
-    elif meme_sites:
-        site_source, site_records = "MEME", meme_sites
-
-    if not site_records:
-        utils.write_empty(args.out_sites, SITES_HEADER)
-        utils.log("no site-level method produced results; header-only site table")
+            rec_caveat = "GARD found no breakpoint"
     else:
-        col_domain = build_codon_domain_map(codon_records, domains, hits)
-        with open(args.out_sites, "w") as out:
-            out.write(SITES_HEADER + "\n")
-            for rec in site_records:
-                col = rec["site"]
-                domain = col_domain.get(col, "NA")
-                p = rec["p"]
-                p_str = (round(p, 6) if isinstance(p, float) and p == p else "")
-                out.write(
-                    f"{rec['site']}\t{col}\t{domain}\t{rec['stat']}\t{p_str}\t{rec['class']}\n"
-                )
-        utils.log(f"site table from {site_source}: {len(site_records)} sites")
+        summary.append(("GARD", "breakpoints", "", "", "",
+                        "not run (evolution.selection.gard false): all HyPhy tests assume a single "
+                        "tree, which domain shuffling/recombination would violate"))
 
-    utils.log(f"selection: {len(summary_rows)} method row(s) written")
+    fel, meme = {}, {}
+    site_tree = None if site_aln != codon_path else tree_path
+    if "FEL" in methods:
+        js = run_hyphy("fel", site_aln, site_tree, os.path.join(args.workdir, "FEL.json"), args.threads,
+                       extra=["--pvalue", str(site_p)], log_path=os.path.join(args.workdir, "FEL.log"),
+                       seed=args.seed)
+        fel = parse_fel(js, site_p)
+        n_pos = sum(1 for r in fel.values() if r["class"] == "positive")
+        n_neg = sum(1 for r in fel.values() if r["class"] == "negative")
+        summary.append(("FEL", "sites_positive", n_pos, "", len(fel),
+                        f"p<={site_p} and beta>alpha; {base_note}"))
+        summary.append(("FEL", "sites_negative", n_neg, "", len(fel), f"p<={site_p} and beta<alpha"))
+    if "MEME" in methods:
+        js = run_hyphy("meme", site_aln, site_tree, os.path.join(args.workdir, "MEME.json"), args.threads,
+                       extra=["--pvalue", str(site_p)], log_path=os.path.join(args.workdir, "MEME.log"),
+                       seed=args.seed)
+        meme = parse_meme(js, site_p)
+        summary.append(("MEME", "sites_episodic", sum(1 for r in meme.values() if r["class"] == "episodic"),
+                        "", len(meme), f"p<={site_p}; {base_note}"))
+    if "BUSTED" in methods:
+        js = run_hyphy("busted", codon_path, tree_path, os.path.join(args.workdir, "BUSTED.json"),
+                       args.threads, log_path=os.path.join(args.workdir, "BUSTED.log"), seed=args.seed)
+        tr = test_results(js, "BUSTED", ("LRT", "p-value"))
+        summary.append(("BUSTED", "episodic_diversifying_p", fmt(tr["p-value"]), fmt(tr["p-value"]),
+                        n_branches(js), f"gene-wide LRT={fmt(tr['LRT'], 4)}; {rec_caveat}"))
+    if "aBSREL" in methods:
+        js = run_hyphy("absrel", codon_path, tree_path, os.path.join(args.workdir, "aBSREL.json"),
+                       args.threads, log_path=os.path.join(args.workdir, "aBSREL.log"), seed=args.seed)
+        tr = test_results(js, "aBSREL", ("positive test results", "tested"))
+        n_sel = tr["positive test results"]
+        if abs(args.branch_pvalue - fnum(js.get("test results", {}).get("P-value threshold", BRANCH_PVAL))) > 1e-12:
+            n_sel = 0
+            for _b, d in (js.get("branch attributes", {}).get("0", {}) or {}).items():
+                if isinstance(d, dict) and fnum(d.get("Corrected P-value")) <= args.branch_pvalue:
+                    n_sel += 1
+        summary.append(("aBSREL", "branches_selected", int(n_sel), "", int(tr["tested"]),
+                        f"Holm-corrected p<={args.branch_pvalue}; {rec_caveat}"))
+    if "RELAX" in methods:
+        if args.relax_partition != "methanogen":
+            summary.append(("RELAX", "K", "", "", "", f"not run: relax-partition '{args.relax_partition}'"))
+        else:
+            states = host_states(args.master)
+            tip_state = {n: states.get(utils.genome_of(n), "U") for n in keep}
+            labels = relax_labels(tree, tip_state, args.relax_labelling)
+            n_test = sum(1 for v in labels.values() if v == "Test")
+            n_ref = sum(1 for v in labels.values() if v == "Reference")
+            n_tip_t = sum(1 for nd, v in labels.items() if v == "Test" and nd.is_leaf())
+            if n_test < 1 or n_ref < 1:
+                summary.append(("RELAX", "K", "", "", "", f"not run: no Test/Reference split "
+                                f"(Test={n_test}, Reference={n_ref} branches)"))
+            else:
+                lab_path = os.path.join(args.workdir, "relax.labelled.nwk")
+                with open(lab_path, "w") as fh:
+                    fh.write(clean_newick(
+                        tree,
+                        tip_label=lambda nd: nd.taxon.label + (f"{{{labels[nd]}}}" if nd in labels else ""),
+                        node_label=lambda nd: f"{{{labels[nd]}}}" if nd in labels else "") + "\n")
+                js = run_hyphy("relax", codon_path, lab_path, os.path.join(args.workdir, "RELAX.json"),
+                               args.threads, extra=["--test", "Test", "--reference", "Reference"],
+                               log_path=os.path.join(args.workdir, "RELAX.log"), seed=args.seed)
+                tr = test_results(js, "RELAX", ("LRT", "p-value", "relaxation or intensification parameter"))
+                n_unc = sum(1 for nd in tree.preorder_node_iter() if nd.parent_node is not None) - n_test - n_ref
+                summary.append(("RELAX", "K", fmt(tr["relaxation or intensification parameter"], 4),
+                                fmt(tr["p-value"]), n_test + n_ref,
+                                f"{args.relax_labelling} labelling: Test={n_test} methanogen branches "
+                                f"({n_tip_t} terminal), Reference={n_ref}, Unclassified={n_unc} (nuisance); "
+                                f"LRT={fmt(tr['LRT'], 4)}; K>1 intensified, K<1 relaxed; {rec_caveat}"))
+
+    # ---- site table -------------------------------------------------------------
+    site_rows = []
+    if fel or meme:
+        doms = column_domains(records, hits, spec)
+        L = len(records[0][1]) // 3
+        for c in range(L):
+            f, m = fel.get(c), meme.get(c)
+            if f is None and m is None:
+                continue
+            dom, sup, cov = doms[c]
+            src = f if f is not None else None
+            site_rows.append({
+                "site": c + 1, "alignment_col": c + 1, "domain": dom,
+                "beta_alpha_or_dnds": fmt(src["ratio"], 4) if src else "",
+                "p_value": fmt(src["p"]) if src else (fmt(m["p"]) if m else ""),
+                "classification": src["class"] if src else ("positive" if m and m["class"] == "episodic" else "neutral"),
+                "fel_alpha": fmt(f["alpha"]) if f else "", "fel_beta": fmt(f["beta"]) if f else "",
+                "meme_p_value": fmt(m["p"]) if m else "", "meme_classification": m["class"] if m else "",
+                "n_seqs_with_codon": cov, "domain_support": sup,
+            })
+    write_outputs(summary, site_rows, args)
+    utils.log(f"selection: {len(summary)} summary row(s), {len(site_rows)} site row(s)")
 
 
 if __name__ == "__main__":

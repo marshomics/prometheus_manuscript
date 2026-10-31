@@ -28,12 +28,11 @@ TIER_ORDER = ["A", "B", "C", "Rejected"]
 
 
 def _load(path, name):
+    """DataFrame, or None for a missing / header-only table. A malformed table raises
+    (a crashed upstream step must not turn into a 'no data' placeholder)."""
     if not path or not os.path.exists(path):
         return None, f"{name} file missing"
-    try:
-        df = pd.read_csv(path, sep="\t")
-    except Exception as exc:
-        return None, f"{name} unreadable ({exc})"
+    df = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
     if df.empty:
         return None, f"{name} empty"
     return df, None
@@ -51,7 +50,11 @@ def plot_detection_summary(catalog, sensitivity, outdir):
         placeholder(prefix, "no data: prometheus_catalog.tsv missing or has no confidence_tier")
         return
 
-    tiers = catalog["confidence_tier"].fillna("C").astype(str)
+    tiers = catalog["confidence_tier"].astype(str)
+    unknown = sorted(set(tiers) - set(TIER_ORDER))
+    if unknown:
+        raise SystemExit(f"[plot_prometheus_validation] FATAL: unexpected confidence_tier "
+                         f"value(s) {unknown}")
     counts = [int((tiers == t).sum()) for t in TIER_ORDER]
 
     # genomes carrying a retained (present) Prometheus locus
@@ -87,13 +90,9 @@ def plot_architecture(catalog, outdir):
         placeholder(prefix, "no data: required columns (architecture, confidence_tier) absent")
         return
 
-    df = catalog.dropna(subset=["architecture"]).copy()
-    df = df[df["architecture"].astype(str).str.len() > 0]
-    if df.empty:
-        placeholder(prefix, "no data: no rows with architecture annotation")
-        return
-
-    df["confidence_tier"] = df["confidence_tier"].fillna("C").astype(str)
+    df = catalog.copy()
+    df["architecture"] = df["architecture"].astype(str).replace("", "none")
+    df["confidence_tier"] = df["confidence_tier"].astype(str)
     top_arch = df["architecture"].value_counts().head(12).index.tolist()
     df_top = df[df["architecture"].isin(top_arch)].copy()
 
@@ -114,6 +113,7 @@ def plot_architecture(catalog, outdir):
     ax.set_xticks(range(len(counts)))
     ax.set_xticklabels(counts.index, rotation=40, ha="right", fontsize=5)
     ax.set_ylabel("No. loci")
+    ax.set_xlabel("Domain architecture (N->C; DUF3320 optional)")
     ax.set_title("Prometheus architecture × confidence tier")
     handles = [mpatches.Patch(color=TIER_COLORS.get(t, OKABE_ITO["grey"]), label=t)
                for t in tiers_present]

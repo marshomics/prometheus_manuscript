@@ -27,7 +27,7 @@ from matplotlib import font_manager  # noqa: E402
 
 DPI = int(os.environ.get("PROM_DPI", "600"))
 FONT_FAMILY = os.environ.get("PROM_FONT", "Arial")
-FALLBACK_FONT = "DejaVu Sans"
+FALLBACK_FONT = os.environ.get("PROM_FALLBACK_FONT", "DejaVu Sans")
 BASE_SIZE = float(os.environ.get("PROM_FONT_SIZE", "7"))
 
 # Colour-blind-safe qualitative palette (Okabe–Ito).
@@ -76,16 +76,39 @@ def apply_style(font_family: str | None = None, base_size: float | None = None) 
     })
 
 
-def save_fig(fig, prefix: str, formats=("png", "svg"), dpi: int | None = None) -> None:
-    """Write `prefix.png` and `prefix.svg` (or whatever `formats` lists)."""
+def default_formats() -> tuple:
+    """config plotting.formats as exported by the workflow (PROM_PLOT_FORMATS, set in
+    common.smk), else png + svg. The figure rules declare one output per listed format."""
+    env = os.environ.get("PROM_PLOT_FORMATS", "")
+    fm = tuple(x.strip().lower().lstrip(".") for x in env.split(",") if x.strip())
+    return fm or ("png", "svg")
+
+
+def _formats(formats) -> tuple:
+    if formats is None:
+        return default_formats()
+    if isinstance(formats, str):
+        formats = formats.split(",")
+    fm = tuple(str(x).strip().lower().lstrip(".") for x in formats if str(x).strip())
+    return fm or default_formats()
+
+
+def save_fig(fig, prefix: str, formats=None, dpi: int | None = None) -> None:
+    """Write `prefix.<ext>` for every format (default: config plotting.formats via
+    PROM_PLOT_FORMATS, else png + svg). Raises if a file is not written."""
     os.makedirs(os.path.dirname(os.path.abspath(prefix)), exist_ok=True)
     d = dpi or DPI
-    for ext in formats:
-        fig.savefig(f"{prefix}.{ext}", dpi=d, transparent=True)
-    plt.close(fig)
+    try:
+        for ext in _formats(formats):
+            path = f"{prefix}.{ext}"
+            fig.savefig(path, dpi=d, transparent=True)
+            if not os.path.isfile(path) or os.path.getsize(path) == 0:
+                raise RuntimeError(f"figure not written: {path}")
+    finally:
+        plt.close(fig)
 
 
-def placeholder(prefix: str, message: str, formats=("png", "svg")) -> None:
+def placeholder(prefix: str, message: str, formats=None) -> None:
     """Emit a labelled empty figure so the DAG completes when an input is empty."""
     apply_style()
     fig, ax = plt.subplots(figsize=(4, 2.2))

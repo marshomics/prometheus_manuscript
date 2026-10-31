@@ -2,7 +2,7 @@
 # Shared plotting helpers for the R figure scripts.
 #
 # Every R figure script sources this file and saves through save_plot(),
-# which writes BOTH:
+# which writes every format in config plotting.formats (default png + svg):
 #   * {prefix}.svg via svglite::svglite -- text is written as EDITABLE
 #     <text> elements (not converted to paths/outlines), so the figure
 #     opens in Adobe Illustrator with type that can still be selected,
@@ -62,7 +62,23 @@ METHANOGEN_COLORS <- c(`TRUE` = "#009E73", `FALSE` = "#F0E442")
   fam
 }
 
-PUB_FONT <- .pick_font_family("Arial")
+PUB_FONT <- .pick_font_family(Sys.getenv("PROM_FONT", "Arial"))
+# config plotting.* as exported by common.smk (PROM_*); defaults = the documented ones.
+PUB_BASE_SIZE <- suppressWarnings(as.numeric(Sys.getenv("PROM_FONT_SIZE", "7")))
+if (is.na(PUB_BASE_SIZE) || PUB_BASE_SIZE <= 0) PUB_BASE_SIZE <- 7
+PLOT_DPI <- suppressWarnings(as.integer(Sys.getenv("PROM_DPI", "600")))
+if (is.na(PLOT_DPI) || PLOT_DPI < 72) PLOT_DPI <- 600L
+
+# Formats every figure is written in: config plotting.formats (PROM_PLOT_FORMATS), the
+# same list the figure rules declare as outputs. Supported: png, svg, pdf.
+plot_formats <- function() {
+  f <- tolower(sub("^\\.", "", trimws(strsplit(Sys.getenv("PROM_PLOT_FORMATS", "png,svg"), ",")[[1]])))
+  f <- f[nzchar(f)]
+  if (!length(f)) f <- c("png", "svg")
+  bad <- setdiff(f, c("png", "svg", "pdf"))
+  if (length(bad)) stop("plotting.formats: unsupported format(s): ", paste(bad, collapse = ", "))
+  unique(f)
+}
 
 
 # --------------------------------------------------------------------- #
@@ -70,7 +86,7 @@ PUB_FONT <- .pick_font_family("Arial")
 # A clean, journal-style ggplot2 theme: white background, thin axes,
 # no top/right spines, small legend, Arial (or sans fallback) family.
 # --------------------------------------------------------------------- #
-theme_pub <- function(base_size = 7, base_family = PUB_FONT) {
+theme_pub <- function(base_size = PUB_BASE_SIZE, base_family = PUB_FONT) {
   if (!isTRUE(ok_gg)) return(NULL)  # ggplot2 missing -> no-op (guarded use)
   ggplot2::theme_bw(base_size = base_size, base_family = base_family) +
     ggplot2::theme(
@@ -94,21 +110,25 @@ theme_pub <- function(base_size = 7, base_family = PUB_FONT) {
 
 # --------------------------------------------------------------------- #
 # save_plot(plot, prefix, width = 4, height = 3)
-# Write {prefix}.png (ragg::agg_png, res=600 raster) AND {prefix}.svg
-# (svglite::svglite, EDITABLE <text> for Illustrator). `plot` may be a
-# ggplot, a patchwork/cowplot object, or a function/expression that draws
-# to the active device (for base-graphics figures such as cophyloplot /
-# phytools maps). Dimensions are in inches. Never throws: on any device
-# error it writes a minimal placeholder so the DAG still completes.
+# Write {prefix}.<ext> for every configured format (plot_formats(): png via
+# ragg::agg_png at PLOT_DPI, svg via svglite with EDITABLE <text> for Illustrator,
+# pdf via cairo_pdf). `plot` may be a ggplot, a patchwork/cowplot object, or a
+# function that draws to the active device (base graphics: cophyloplot, phytools
+# maps). Dimensions are in inches. A render error FAILS (the partial file is removed
+# and the error propagates), so a broken figure can never pass as a finished output;
+# placeholders are drawn only deliberately, via placeholder_plot() for empty inputs.
 # --------------------------------------------------------------------- #
-save_plot <- function(plot, prefix, width = 4, height = 3, res = 600) {
+save_plot <- function(plot, prefix, width = 4, height = 3, res = PLOT_DPI,
+                      formats = plot_formats()) {
   dir.create(dirname(prefix), showWarnings = FALSE, recursive = TRUE)
   is_grob <- isTRUE(ok_gg) && (ggplot2::is.ggplot(plot) ||
                                inherits(plot, c("patchwork", "gg", "ggassemble")))
   is_drawfun <- is.function(plot)
 
-  .render <- function(dev_open, dev_close) {
+  .render <- function(path, dev_open) {
     opened <- FALSE
+    ok <- FALSE
+    err <- ""
     tryCatch({
       dev_open(); opened <- TRUE
       if (is_grob) {
@@ -118,53 +138,57 @@ save_plot <- function(plot, prefix, width = 4, height = 3, res = 600) {
       } else if (inherits(plot, "recordedplot")) {
         grDevices::replayPlot(plot)
       } else {
-        # last resort: try printing whatever it is
         print(plot)
       }
+      ok <- TRUE
     }, error = function(e) {
-      message("save_plot: render error: ", conditionMessage(e))
-      tryCatch({
-        graphics::plot.new()
-        graphics::text(0.5, 0.5, paste("Figure unavailable:", conditionMessage(e)))
-      }, error = function(e2) invisible(NULL))
+      err <<- conditionMessage(e)
+      message("save_plot: render error: ", err)
     }, finally = {
-      if (opened) tryCatch(dev_close(), error = function(e) invisible(NULL))
+      if (opened) tryCatch(grDevices::dev.off(), error = function(e) invisible(NULL))
     })
+    if (!ok) {
+      unlink(path)
+      stop("save_plot: failed to render ", path, ": ", err, call. = FALSE)
+    }
+    if (!file.exists(path) || isTRUE(file.info(path)$size == 0))
+      stop("save_plot: figure not written: ", path, call. = FALSE)
+    invisible(path)
   }
 
-  png_path <- paste0(prefix, ".png")
-  svg_path <- paste0(prefix, ".svg")
-
-  # ---- PNG (ragg high-res raster) ---- #
-  if (requireNamespace("ragg", quietly = TRUE)) {
-    .render(function() ragg::agg_png(png_path, width = width, height = height,
-                                     units = "in", res = res, background = "white"),
-            grDevices::dev.off)
-  } else {
-    # Fallback raster if ragg unavailable.
-    .render(function() grDevices::png(png_path, width = width, height = height,
-                                      units = "in", res = res, bg = "white"),
-            grDevices::dev.off)
+  paths <- character(0)
+  for (fmt in formats) {
+    path <- paste0(prefix, ".", fmt)
+    opener <- switch(fmt,
+      png = if (requireNamespace("ragg", quietly = TRUE)) {
+        function() ragg::agg_png(path, width = width, height = height, units = "in",
+                                 res = res, background = "white")
+      } else {
+        function() grDevices::png(path, width = width, height = height, units = "in",
+                                  res = res, bg = "white")
+      },
+      svg = if (requireNamespace("svglite", quietly = TRUE)) {
+        function() svglite::svglite(path, width = width, height = height, bg = "white")
+      } else {
+        function() grDevices::svg(path, width = width, height = height, bg = "white")
+      },
+      pdf = if (isTRUE(capabilities("cairo"))) {
+        function() grDevices::cairo_pdf(path, width = width, height = height, bg = "white")
+      } else {
+        function() grDevices::pdf(path, width = width, height = height, bg = "white",
+                                  useDingbats = FALSE)
+      },
+      stop("save_plot: unsupported format '", fmt, "'"))
+    .render(path, opener)
+    paths[[fmt]] <- path
   }
-
-  # ---- SVG (svglite, editable text) ---- #
-  if (requireNamespace("svglite", quietly = TRUE)) {
-    .render(function() svglite::svglite(svg_path, width = width, height = height,
-                                        bg = "white"),
-            grDevices::dev.off)
-  } else {
-    .render(function() grDevices::svg(svg_path, width = width, height = height,
-                                      bg = "white"),
-            grDevices::dev.off)
-  }
-
-  invisible(c(png = png_path, svg = svg_path))
+  invisible(paths)
 }
 
 
 # --------------------------------------------------------------------- #
 # placeholder_plot(prefix, message)
-# A labelled empty figure (png + svg) for trivial/empty inputs, so the
+# A labelled empty figure (configured formats) for trivial/empty inputs, so the
 # Snakemake DAG always finds its declared outputs. Uses save_plot.
 # --------------------------------------------------------------------- #
 placeholder_plot <- function(prefix, message, width = 4, height = 2.2) {

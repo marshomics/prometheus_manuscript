@@ -1,18 +1,25 @@
 #!/usr/bin/env Rscript
 # =====================================================================
-# Stage 5/7 figure -- gene-tree vs species-tree tanglegram (design Stage
-# 5.2/7.1). Each Prometheus gene-tree tip (genome__orig) is linked to its
-# host genome in the species tree; links are coloured by the host's
-# methanogen status. Visualises whether Prometheus's gene history tracks
-# the archaeal species history (vertical) or crosses it (transfer).
+# Stage 5 figure -- Prometheus gene tree vs archaeal species tree (tanglegram).
+# Each gene-tree tip (genome__gene) is linked to its host genome on the species tree;
+# links are coloured by host status (methanogen / ANME / other). Shows whether the gene
+# history tracks the species history (vertical) or crosses it (transfer).
 #
-# Uses phytools::cophylo(species_tree, gene_tree, assoc) when available
-# (rotates tips to minimise crossings) and falls back to ape::cophyloplot.
-# Saves {plot-prefix}.png/.svg via save_plot. Trivial trees ->
-# placeholder_plot, quit(status=0).
+# * The species tree is pruned to the genomes that carry a gene in the gene tree (the
+#   carriers are what the comparison is about; thousands of empty tips are unreadable).
+# * The IQ-TREE gene tree is unrooted; it is midpoint-rooted FOR DISPLAY ONLY (stated in
+#   the title). GeneRax infers its own root for the reconciliation.
+# * phytools::cophylo(rotate = TRUE) minimises crossings; link colours are taken from the
+#   association matrix cophylo returns, so they stay matched to the links.
+# Genuinely empty input (trivial tree, < 2 links) -> labelled placeholder; any other
+# error exits non-zero.
 # =====================================================================
 
-suppressWarnings(suppressMessages({ library(optparse) }))
+suppressWarnings(suppressMessages({
+  library(optparse)
+  library(ape)
+  library(phytools)
+}))
 
 .script_path <- function() {
   ca <- commandArgs(trailingOnly = FALSE)
@@ -20,137 +27,108 @@ suppressWarnings(suppressMessages({ library(optparse) }))
   if (length(m)) return(normalizePath(sub("^--file=", "", m[1])))
   ""
 }
-.this_dir <- tryCatch(dirname(.script_path()), error = function(e) ".")
-if (is.na(.this_dir) || !nzchar(.this_dir)) .this_dir <- "."
-.theme_ok <- tryCatch({
-  suppressWarnings(suppressMessages(source(file.path(.this_dir, "plotting_theme.R")))); TRUE
-}, error = function(e) FALSE)
+.theme <- Filter(file.exists, c(file.path(dirname(.script_path()), "plotting_theme.R"),
+                                file.path(getwd(), "plotting_theme.R")))
+if (!length(.theme)) stop("plotting_theme.R not found next to plot_tanglegram.R")
+source(.theme[1])
 
-.placeholder <- function(prefix, msg) {
-  if (.theme_ok && exists("placeholder_plot"))
-    tryCatch(placeholder_plot(prefix, msg), error = function(e) NULL)
-  else {
-    for (dev in list(
-      function() grDevices::png(paste0(prefix, ".png"), 4, 2.2, units = "in", res = 300),
-      function() grDevices::svg(paste0(prefix, ".svg"), 4, 2.2)))
-      tryCatch({ dev(); graphics::plot.new(); graphics::text(0.5, 0.5, msg)
-                 grDevices::dev.off() }, error = function(e) NULL)
-  }
-}
+# other = non-methanogen host (no mcrA, or MCR-like alkane oxidiser); unknown = McrA host
+# whose placement is ambiguous/unplaced, or a genome missing from the master table
+COLS <- c(methanogen = "#009E73", ANME = "#CC79A7", other = "#E69F00", unknown = "#999999")
 
 is_trivial_tree <- function(path) {
-  txt <- tryCatch(paste(readLines(path, warn = FALSE), collapse = ""),
-                  error = function(e) "")
-  !nzchar(trimws(txt)) || grepl("^\\(\\s*\\)\\s*;?$", trimws(txt))
+  txt <- trimws(paste(readLines(path, warn = FALSE), collapse = ""))
+  !nzchar(txt) || grepl("^\\(\\s*\\)\\s*;?$", txt)
 }
 
-as_logical_col <- function(x) {
-  s <- tolower(trimws(as.character(x))); s %in% c("true", "1", "yes", "t")
+flag <- function(x) tolower(trimws(as.character(x))) %in% c("true", "1", "yes", "t")
+
+host_class <- function(genomes, master_path) {
+  out <- setNames(rep("unknown", length(genomes)), genomes)
+  if (is.null(master_path) || !nzchar(master_path)) return(out)
+  m <- read.delim(master_path, sep = "\t", colClasses = "character", check.names = FALSE)
+  if (!all(c("genome_id", "methanogen") %in% names(m)))
+    stop("master table lacks genome_id/methanogen")
+  anme <- if ("is_anme" %in% names(m)) flag(m$is_anme) else rep(FALSE, nrow(m))
+  grp <- if ("mcr_group" %in% names(m)) tolower(trimws(m$mcr_group)) else rep("", nrow(m))
+  anme <- anme | grp == "anme"
+  cls <- ifelse(flag(m$methanogen), "methanogen", ifelse(anme, "ANME",
+         ifelse(grp %in% c("ambiguous", "unplaced", "not_placed"), "unknown", "other")))
+  cls <- setNames(cls, trimws(m$genome_id))
+  hit <- genomes %in% names(cls)
+  out[hit] <- cls[genomes[hit]]
+  out
 }
 
 main <- function() {
   option_list <- list(
     make_option("--gene-tree", type = "character", dest = "gene_tree"),
     make_option("--species-tree", type = "character", dest = "species_tree"),
-    make_option("--master", type = "character"),
+    make_option("--master", type = "character", default = ""),
     make_option("--plot-prefix", type = "character", dest = "plot_prefix")
   )
   opt <- parse_args(OptionParser(option_list = option_list))
+  for (k in c("gene_tree", "species_tree", "plot_prefix"))
+    if (is.null(opt[[k]])) stop("--", gsub("_", "-", k), " is required")
 
-  tryCatch({
-    stopifnot(!is.null(opt$gene_tree), !is.null(opt$species_tree),
-              !is.null(opt$plot_prefix))
+  if (is_trivial_tree(opt$gene_tree) || is_trivial_tree(opt$species_tree)) {
+    placeholder_plot(opt$plot_prefix, "Tanglegram: empty gene or species tree")
+    message("plot_tanglegram: trivial tree(s); placeholder")
+    return(invisible(NULL))
+  }
+  gtree <- read.tree(opt$gene_tree)
+  stree <- read.tree(opt$species_tree)
+  if (!is.rooted(stree)) stop("species tree is not rooted (scaffolds/root_tree.py must root it)")
+  gtree$node.label <- NULL; stree$node.label <- NULL
+  g_geno <- sub("__.*$", "", gtree$tip.label)
+  on_sp <- g_geno %in% stree$tip.label
+  if (sum(on_sp) < 2) {
+    placeholder_plot(opt$plot_prefix, sprintf("Tanglegram: %d gene tip(s) map to the species tree", sum(on_sp)))
+    message("plot_tanglegram: < 2 links; placeholder")
+    return(invisible(NULL))
+  }
+  n_unmapped <- sum(!on_sp)
+  if (n_unmapped) gtree <- drop.tip(gtree, gtree$tip.label[!on_sp])
+  g_geno <- sub("__.*$", "", gtree$tip.label)
+  carriers <- unique(g_geno)
+  if (length(carriers) < 2) {
+    placeholder_plot(opt$plot_prefix, "Tanglegram: genes come from < 2 genomes")
+    return(invisible(NULL))
+  }
+  stree <- keep.tip(stree, carriers)
+  if (Ntip(gtree) >= 3) gtree <- midpoint.root(gtree)
+  if (!is.null(gtree$edge.length)) gtree$edge.length[gtree$edge.length <= 0] <- 1e-6
+  assoc <- cbind(g_geno, gtree$tip.label)       # (species tip, gene tip)
+  cls <- host_class(carriers, opt$master)
 
-    suppressWarnings(suppressMessages({ library(ape) }))
-
-    if (is_trivial_tree(opt$gene_tree) || is_trivial_tree(opt$species_tree)) {
-      .placeholder(opt$plot_prefix, "Tanglegram: empty gene or species tree")
-      message("plot_tanglegram: trivial tree(s); placeholder."); return(invisible(NULL))
-    }
-    gtree <- tryCatch(read.tree(opt$gene_tree), error = function(e) NULL)
-    stree <- tryCatch(read.tree(opt$species_tree), error = function(e) NULL)
-    if (is.null(gtree) || is.null(stree) ||
-        length(gtree$tip.label) < 3 || length(stree$tip.label) < 3) {
-      .placeholder(opt$plot_prefix, "Tanglegram: <3 tips in a tree")
-      message("plot_tanglegram: <3 tips; placeholder."); return(invisible(NULL))
-    }
-
-    # gene tip 'genome__orig' -> genome (species tip)
-    g_geno <- sub("__.*", "", gtree$tip.label)
-    # association: only gene tips whose genome is a species-tree tip
-    on_species <- g_geno %in% stree$tip.label
-    if (sum(on_species) < 2) {
-      .placeholder(opt$plot_prefix, "Tanglegram: <2 gene tips map to species tree")
-      message("plot_tanglegram: too few links; placeholder."); return(invisible(NULL))
-    }
-    assoc <- cbind(stree = g_geno[on_species],
-                   gene  = gtree$tip.label[on_species])
-
-    # methanogen colour by host genome (from master)
-    link_col <- rep("#999999", nrow(assoc))  # grey default
-    if (!is.null(opt$master) && file.exists(opt$master)) {
-      master <- tryCatch(
-        suppressWarnings(suppressMessages(
-          readr::read_tsv(opt$master, show_col_types = FALSE, progress = FALSE))),
-        error = function(e) NULL)
-      if (!is.null(master) && all(c("genome_id", "methanogen") %in% names(master))) {
-        meth <- setNames(as_logical_col(master$methanogen),
-                         trimws(as.character(master$genome_id)))
-        mv <- meth[assoc[, "stree"]]
-        link_col <- ifelse(!is.na(mv) & mv, "#009E73", "#E69F00")  # green meth / orange non
-      }
-    }
-
-    n_tips <- max(length(gtree$tip.label), length(stree$tip.label))
-    h <- max(3.5, min(0.16 * n_tips, 13))
-    show_labels <- n_tips <= 70
-
-    have_cophylo <- requireNamespace("phytools", quietly = TRUE)
-
-    draw <- function() {
-      if (have_cophylo) {
-        obj <- tryCatch(
-          phytools::cophylo(stree, gtree, assoc = assoc, rotate = TRUE),
-          error = function(e) NULL)
-        if (!is.null(obj)) {
-          # link colours must align to obj$assoc order; cophylo keeps assoc rows.
-          lc <- link_col
-          tryCatch(
-            plot(obj, link.col = lc, link.lwd = 1.2,
-                 fsize = if (show_labels) 0.4 else 1e-6,
-                 link.type = "curved", pts = FALSE),
-            error = function(e)
-              plot(obj, fsize = if (show_labels) 0.4 else 1e-6))
-          graphics::title(main = "Prometheus gene tree vs archaeal species tree\n(links: green=methanogen, orange=non-methanogen host)",
-                          cex.main = 0.7)
-          return(invisible(NULL))
-        }
-      }
-      # fallback: ape::cophyloplot
-      ape::cophyloplot(stree, gtree, assoc = assoc, length.line = 1,
-                       space = 60, gap = 3, col = link_col,
-                       show.tip.label = show_labels, font = 1)
-      graphics::title(main = "Prometheus gene tree vs species tree (cophyloplot)",
-                      cex.main = 0.7)
-    }
-
-    if (.theme_ok && exists("save_plot")) {
-      save_plot(draw, opt$plot_prefix, width = 7.5, height = h)
-    } else {
-      .placeholder(opt$plot_prefix, "Tanglegram (plotting helper unavailable)")
-    }
-    message(sprintf("plot_tanglegram: %d links (gene<->species) -> %s.{png,svg}",
-                    nrow(assoc), opt$plot_prefix))
-    invisible(NULL)
-
-  }, error = function(e) {
-    message("plot_tanglegram: top-level error: ", conditionMessage(e))
-    tryCatch(.placeholder(opt$plot_prefix, "Tanglegram: error"),
-             error = function(e2) invisible(NULL))
-    invisible(NULL)
-  })
-
-  quit(status = 0)
+  obj <- cophylo(stree, gtree, assoc = assoc, rotate = TRUE, print = FALSE)
+  a <- obj$assoc
+  link_col <- COLS[cls[a[, 1]]]
+  n_tips <- max(Ntip(gtree), Ntip(stree))
+  show_labels <- n_tips <= 70
+  draw <- function() {
+    # outer margins hold the title (top) and the legend + omitted-gene note (bottom), so
+    # neither is clipped nor drawn over the trees (cophylo uses the whole plot region)
+    op <- graphics::par(oma = c(1.8, 0, 1.6, 0))
+    on.exit(graphics::par(op))
+    plot(obj, link.col = unname(link_col), link.lwd = 1.1, link.type = "curved",
+         fsize = if (show_labels) 0.4 else 1e-6, pts = FALSE)
+    graphics::mtext(sprintf(
+      "Species tree (%d carrier genomes)  vs  Prometheus gene tree (%d genes, midpoint-rooted for display)",
+      Ntip(stree), Ntip(gtree)), side = 3, outer = TRUE, line = 0.4, cex = 0.6, font = 2)
+    present <- names(COLS)[names(COLS) %in% unique(cls)]
+    graphics::par(fig = c(0, 1, 0, 1), oma = c(0, 0, 0, 0), mar = c(0, 0, 0, 0), new = TRUE)
+    graphics::plot.new()
+    graphics::legend("bottomleft", legend = paste("host:", present), col = COLS[present], lwd = 2,
+                     bty = "n", cex = 0.5, horiz = TRUE, inset = c(0.005, 0.002))
+    if (n_unmapped)
+      graphics::legend("bottomright", legend = sprintf(
+        "%d gene(s) whose genome is not on the species tree omitted", n_unmapped),
+        bty = "n", cex = 0.5, inset = c(0.005, 0.002))
+  }
+  save_plot(draw, opt$plot_prefix, width = 7.5, height = max(3.5, min(0.16 * n_tips, 13)))
+  message(sprintf("plot_tanglegram: %d links, %d carrier genomes, %d unmapped genes -> %s.{png,svg}",
+                  nrow(a), Ntip(stree), n_unmapped, opt$plot_prefix))
 }
 
-main()
+if (sys.nframe() == 0L) main()

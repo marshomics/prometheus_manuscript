@@ -1,198 +1,205 @@
-"""plot_ecology.py — ecology enrichment and viral/R-loop association figures.
+"""plot_ecology.py -- Stage 6 figures.
 
-Outputs (written to --outdir):
-  ecology_enrichment.{png,svg}
-  viral_rloop_association.{png,svg}
+Outputs (--outdir, one file per --formats entry):
+  ecology_enrichment.*       phylogenetic-logistic (phyloglm) log-odds of every fitted
+                             group_/niche_ predictor with its 95 % Wald interval (ci_low /
+                             ci_high, else estimate +/- 1.96 SE), coloured by BH p_adj < 0.05.
+                             At most 25 rows (smallest p-values first), sorted by estimate.
+  viral_rloop_association.*  proviral load and R-loop-prone provirus fraction by Prometheus
+                             presence (raw distributions only); the panel titles carry the
+                             phyloglm estimate / p_adj from ecology_associations.tsv -- the
+                             phylogeny-controlled inference -- not a naive two-sample test.
+Presence follows SCHEMA Contract v2 item 6 for the tier set --primary-tiers (default A):
+present = best tier in the set, absent = no validated locus, genomes whose validated loci
+are all outside the set are EXCLUDED (and counted in the log). Only pass_primary genomes
+are shown, as in the statistics. A header-only input gives a labelled placeholder; a
+missing or unparsable input is an error.
 """
+import argparse
 import os
 import sys
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from plotting_style import apply_style, save_fig, placeholder, OKABE_ITO, TIER_COLORS
-import utils
+from plotting_style import apply_style, save_fig, placeholder, OKABE_ITO  # noqa: E402
+import utils  # noqa: E402
 
-import argparse
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.patches as mpatches  # noqa: E402
 
 apply_style()
 
-
-def _load(path, name):
-    if not path or not os.path.exists(path):
-        return None, f"{name} missing"
-    df = pd.read_csv(path, sep="\t")
-    if df.empty:
-        return None, f"{name} empty"
-    return df, None
+TRUE_S = {"1", "true", "yes", "t"}
+MAX_ROWS = 25
 
 
-# ---------------------------------------------------------------------------
-# Ecology forest/bar
-# ---------------------------------------------------------------------------
+def load_table(path, name):
+    """DataFrame of strings; None for an empty / header-only table (genuinely empty input)."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"{name} not found: {path}")
+    if os.path.getsize(path) == 0:
+        return None
+    df = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+    return None if df.empty else df
 
-def plot_ecology_enrichment(associations, outdir):
-    """Forest/bar of the phylo-logistic log-odds (estimate) for each species-level
-    group_/niche_ presence-absence predictor, coloured by p_adj<0.05, sorted by
-    estimate, with a reference line at 0. The continuous viral predictors get
-    their own panel (plot_viral_rloop) and are excluded here. Top ~25 by
-    |estimate| are shown when there are many predictors.
-    """
+
+def numeric(s):
+    return pd.to_numeric(s.replace({"": np.nan, "NA": np.nan}), errors="coerce")
+
+
+def presence(master, tiers):
+    """Contract v2 item 6: 1 / 0 / NaN (excluded) per genome."""
+    if "prometheus_tier" in master.columns:
+        t = master["prometheus_tier"].fillna("").str.strip().str.upper()
+        return pd.Series(np.where(t.isin(tiers), 1.0, np.where(t == "", 0.0, np.nan)),
+                         index=master.index)
+    if "prometheus_present" in master.columns:
+        utils.log("WARNING: master has no prometheus_tier; presence = prometheus_present")
+        return master["prometheus_present"].str.strip().str.lower().isin(TRUE_S).astype(float)
+    raise ValueError("master has neither prometheus_tier nor prometheus_present")
+
+
+def analysis_set(master, tiers, label):
+    m = master.copy()
+    if "pass_primary" in m.columns:
+        m = m[m["pass_primary"].str.strip().str.lower().isin(TRUE_S)]
+    m["present"] = presence(m, tiers)
+    n_ex = int(m["present"].isna().sum())
+    m = m[m["present"].notna()].copy()
+    m["present"] = m["present"].astype(int)
+    utils.log(f"{label}: tiers={'+'.join(tiers)}: {int((m['present'] == 1).sum())} present, "
+              f"{int((m['present'] == 0).sum())} absent, {n_ex} excluded (validated locus "
+              f"outside the tier set)")
+    return m, n_ex
+
+
+def wald_interval(df):
+    est = numeric(df["estimate"])
+    lo = numeric(df["ci_low"]) if "ci_low" in df.columns else pd.Series(np.nan, index=df.index)
+    hi = numeric(df["ci_high"]) if "ci_high" in df.columns else pd.Series(np.nan, index=df.index)
+    se = numeric(df["std_error"]) if "std_error" in df.columns else pd.Series(np.nan, index=df.index)
+    lo = lo.where(lo.notna(), est - 1.96 * se)
+    hi = hi.where(hi.notna(), est + 1.96 * se)
+    return est, lo, hi
+
+
+def plot_ecology_enrichment(assoc, outdir, formats):
     prefix = os.path.join(outdir, "ecology_enrichment")
-
-    if associations is None:
-        placeholder(prefix, "no data: ecology_associations.tsv missing or empty")
-        return
-
-    if "estimate" not in associations.columns:
-        placeholder(prefix, "no data: estimate column missing")
-        return
-
-    df = associations.dropna(subset=["estimate"]).copy()
-    # Keep only the ecology (group_/niche_) predictors for this figure.
-    if "predictor" in df.columns:
-        pred = df["predictor"].astype(str)
-        df = df[pred.str.startswith("group_") | pred.str.startswith("niche_")].copy()
+    if assoc is None or not {"predictor", "estimate"}.issubset(assoc.columns):
+        placeholder(prefix, "no data: ecology_associations.tsv is empty", formats)
+        return 0
+    df = assoc[assoc["predictor"].str.match(r"^(group|niche)_")].copy()
+    df["est"], df["lo"], df["hi"] = wald_interval(df)
+    df = df[np.isfinite(df["est"])]
     if df.empty:
-        placeholder(prefix, "no data: no group_/niche_ predictors with an estimate")
-        return
-
-    # Row label = predictor name (each group_/niche_ predictor is a single term).
-    df["_label"] = df["predictor"].astype(str).values
-
-    p_adj = df.get("p_adj", df.get("p_value", pd.Series(np.ones(len(df)), index=df.index))).fillna(1.0)
-    df["_p_adj"] = p_adj.values
-
-    # Top ~25 by |estimate| when many predictors, then sort by estimate for display.
-    if len(df) > 25:
-        df = df.reindex(df["estimate"].abs().sort_values(ascending=False).index[:25])
-    df = df.sort_values("estimate")
-
-    sig = (df["_p_adj"] < 0.05).values
+        placeholder(prefix, "no fitted group_/niche_ predictor (see ecology_associations.tsv notes)",
+                    formats)
+        return 0
+    df["p"] = numeric(df["p_value"]) if "p_value" in df.columns else np.nan
+    df["q"] = numeric(df["p_adj"]) if "p_adj" in df.columns else np.nan
+    if len(df) > MAX_ROWS:
+        df = df.sort_values(["p", "est"], na_position="last").head(MAX_ROWS)
+    df = df.sort_values("est")
+    sig = (df["q"] < 0.05).fillna(False).values
     colors = [OKABE_ITO["vermillion"] if s else OKABE_ITO["grey"] for s in sig]
-
-    ci_lo = df.get("ci_low",  df["estimate"] - df.get("std_error", pd.Series(0, index=df.index)))
-    ci_hi = df.get("ci_high", df["estimate"] + df.get("std_error", pd.Series(0, index=df.index)))
-
+    nlab = df["n"] if "n" in df.columns else pd.Series("", index=df.index)
+    labels = [f"{p}  (n={n})" if n not in ("", "NA") else p for p, n in zip(df["predictor"], nlab)]
     y = np.arange(len(df))
-    fig, ax = plt.subplots(figsize=(4.0, max(2.5, len(df) * 0.28)))
-    ax.scatter(df["estimate"].values, y, color=colors, s=14, zorder=4)
-    ax.hlines(y, ci_lo.values, ci_hi.values, color=colors, linewidth=0.8)
+    fig, ax = plt.subplots(figsize=(4.4, max(2.5, len(df) * 0.28 + 0.8)))
+    ax.hlines(y, df["lo"].values, df["hi"].values, color=colors, linewidth=0.8)
+    ax.scatter(df["est"].values, y, color=colors, s=14, zorder=4)
     ax.axvline(0, color="black", linewidth=0.6, linestyle="--")
     ax.set_yticks(y)
-    ax.set_yticklabels(df["_label"].values, fontsize=5)
-    ax.set_xlabel("Log-odds estimate")
-    ax.set_title("Ecology (niche/group) associations")
-    handles = [mpatches.Patch(color=OKABE_ITO["vermillion"], label="p_adj<0.05"),
-               mpatches.Patch(color=OKABE_ITO["grey"], label="p_adj≥0.05")]
-    ax.legend(handles=handles, frameon=False, fontsize=6)
-    save_fig(fig, prefix)
+    ax.set_yticklabels(labels, fontsize=5)
+    ax.set_xlabel("phyloglm log-odds (95 % Wald CI)")
+    ax.set_title("Niche / group associations (phylogeny-controlled)")
+    handles = [mpatches.Patch(color=OKABE_ITO["vermillion"], label="BH p_adj < 0.05"),
+               mpatches.Patch(color=OKABE_ITO["grey"], label="n.s.")]
+    ax.legend(handles=handles, frameon=False, fontsize=6, loc="best")
+    save_fig(fig, prefix, formats)
+    return len(df)
 
 
-# ---------------------------------------------------------------------------
-# Viral / R-loop association
-# ---------------------------------------------------------------------------
+def _phyloglm_title(assoc, predictor):
+    if assoc is None or "predictor" not in assoc.columns:
+        return "phyloglm: no result"
+    row = assoc[assoc["predictor"] == predictor]
+    if row.empty:
+        return "phyloglm: not tested"
+    est = numeric(row["estimate"]).iloc[0]
+    if not np.isfinite(est):
+        return "phyloglm: not fitted"
+    q = numeric(row["p_adj"]).iloc[0] if "p_adj" in row.columns else np.nan
+    return f"phyloglm β={est:.2f}/SD" + (f", BH p={q:.2g}" if np.isfinite(q) else "")
 
-def plot_viral_rloop(viral, master, outdir):
+
+def plot_viral_rloop(viral, master, assoc, outdir, formats, tiers):
     prefix = os.path.join(outdir, "viral_rloop_association")
-
     if viral is None or master is None:
-        placeholder(prefix, "no data: viral_summary.tsv or master_table.tsv missing")
-        return
-
-    req_v = {"genome_id", "n_proviruses"}
-    req_m = {"genome_id", "prometheus_present"}
-    if not req_v.issubset(viral.columns):
-        placeholder(prefix, f"no data: viral_summary missing columns {req_v - set(viral.columns)}")
-        return
-    if not req_m.issubset(master.columns):
-        placeholder(prefix, f"no data: master_table missing columns {req_m - set(master.columns)}")
-        return
-
-    merge_cols = ["genome_id", "prometheus_present"]
-    merged = viral.merge(master[merge_cols], on="genome_id", how="inner")
-    if merged.empty:
-        placeholder(prefix, "no data: no genome_id overlap between viral_summary and master_table")
-        return
-
-    merged["prometheus_present"] = (
-        merged["prometheus_present"].astype(str).str.strip().str.lower()
-        .isin(["1", "true", "yes"])
-    )
-
-    panels = []
-    if "n_proviruses" in merged.columns:
-        panels.append(("n_proviruses", "No. proviruses"))
-    if "frac_rloop_proviruses" in merged.columns:
-        panels.append(("frac_rloop_proviruses", "Frac. R-loop proviruses"))
-
-    if not panels:
-        placeholder(prefix, "no data: n_proviruses/frac_rloop_proviruses columns missing")
-        return
-
-    groups = {True: "Prometheus+", False: "Prometheus−"}
-    colors = {True: OKABE_ITO["blue"], False: OKABE_ITO["grey"]}
-
-    fig, axes = plt.subplots(1, len(panels), figsize=(3.5 * len(panels), 3.2))
-    if len(panels) == 1:
-        axes = [axes]
-
-    for ax, (col, ylabel) in zip(axes, panels):
-        vals_t = merged.loc[merged["prometheus_present"],  col].dropna().values
-        vals_f = merged.loc[~merged["prometheus_present"], col].dropna().values
-
-        data   = [vals_f, vals_t]
-        xlabs  = [groups[False], groups[True]]
-        xcols  = [colors[False], colors[True]]
-
-        for xi, (d, c) in enumerate(zip(data, xcols)):
-            if len(d) == 0:
+        placeholder(prefix, "no data: viral_summary.tsv or master_table.tsv is empty", formats)
+        return {}
+    need_v = {"genome_id", "n_proviruses", "frac_rloop_proviruses"}
+    if not need_v.issubset(viral.columns):
+        raise ValueError(f"viral summary lacks {sorted(need_v - set(viral.columns))}")
+    m, n_ex = analysis_set(master, tiers, "viral_rloop_association")
+    d = m[["genome_id", "present"]].merge(viral, on="genome_id", how="inner")
+    if d.empty or d["present"].nunique() < 1:
+        placeholder(prefix, "no data: no genome shared by the master and viral tables", formats)
+        return {}
+    panels = [("n_proviruses", "proviruses per genome"),
+              ("frac_rloop_proviruses", "fraction of proviruses R-loop-prone\n(genomes with >= 1 provirus)")]
+    fig, axes = plt.subplots(1, 2, figsize=(6.4, 3.0))
+    counts = {"excluded": n_ex}
+    for k, (ax, (col, ylabel)) in enumerate(zip(axes, panels)):
+        vals = numeric(d[col])
+        groups = [vals[d["present"] == g].dropna().values for g in (0, 1)]
+        counts[col] = (len(groups[0]), len(groups[1]))
+        rng = np.random.default_rng(42 + k)
+        for xi, (g, c) in enumerate(zip(groups, (OKABE_ITO["grey"], OKABE_ITO["blue"]))):
+            if len(g) == 0:
                 continue
-            bp = ax.boxplot(d, positions=[xi], widths=0.5, patch_artist=True,
-                            boxprops=dict(facecolor=c, alpha=0.55),
-                            medianprops=dict(color="black", linewidth=0.8),
-                            flierprops=dict(marker="o", markersize=2, alpha=0.3,
-                                            markerfacecolor=c, markeredgewidth=0),
-                            whiskerprops=dict(linewidth=0.7),
-                            capprops=dict(linewidth=0.7))
-            jitter = np.random.default_rng(42).uniform(-0.18, 0.18, size=len(d))
-            ax.scatter(xi + jitter, d, s=4, alpha=0.4, color=c, zorder=3)
-
-        # Mann-Whitney p
-        if len(vals_t) > 0 and len(vals_f) > 0:
-            try:
-                from scipy.stats import mannwhitneyu
-                _, pval = mannwhitneyu(vals_t, vals_f, alternative="two-sided")
-                pstr = f"MW p={pval:.3g}"
-                ax.set_title(pstr, fontsize=6)
-            except Exception:
-                pass
-
+            ax.boxplot(g, positions=[xi], widths=0.5, patch_artist=True, showfliers=False,
+                       boxprops=dict(facecolor=c, alpha=0.5),
+                       medianprops=dict(color="black", linewidth=0.8),
+                       whiskerprops=dict(linewidth=0.7), capprops=dict(linewidth=0.7))
+            ax.scatter(xi + rng.uniform(-0.18, 0.18, size=len(g)), g, s=4, alpha=0.45,
+                       color=c, zorder=3)
         ax.set_xticks([0, 1])
-        ax.set_xticklabels(xlabs, fontsize=6)
-        ax.set_ylabel(ylabel)
-
-    save_fig(fig, prefix)
+        ax.set_xticklabels([f"Prometheus−\n(n={len(groups[0])})",
+                            f"Prometheus+\n(n={len(groups[1])})"], fontsize=6)
+        ax.set_xlim(-0.6, 1.6)
+        ax.set_ylabel(ylabel, fontsize=6)
+        ax.set_title(_phyloglm_title(assoc, col), fontsize=6)
+    fig.suptitle(f"Viral pressure and R-loop-prone proviruses (tiers {'+'.join(tiers)}; "
+                 f"{n_ex} excluded)", fontsize=7)
+    fig.tight_layout(rect=[0, 0, 1, 0.92])
+    save_fig(fig, prefix, formats)
+    utils.log(f"viral_rloop_association: n absent/present per panel {counts}")
+    return counts
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Ecology figures")
-    parser.add_argument("--associations", required=True, help="ecology/ecology_associations.tsv")
-    parser.add_argument("--viral",        required=True, help="ecology/viral/viral_summary.tsv")
-    parser.add_argument("--master",       required=True, help="scaffolds/master_table.tsv")
-    parser.add_argument("--outdir",       required=True, help="Output directory")
-    args = parser.parse_args()
-
+    ap = argparse.ArgumentParser(description="Stage 6 ecology figures")
+    ap.add_argument("--associations", required=True, help="ecology/ecology_associations.tsv")
+    ap.add_argument("--viral", required=True, help="ecology/viral/viral_summary.tsv")
+    ap.add_argument("--master", required=True, help="scaffolds/master_table.tsv")
+    ap.add_argument("--outdir", required=True)
+    ap.add_argument("--primary-tiers", default="A", help="tier set T for presence (comma list)")
+    ap.add_argument("--formats", default="png,svg", help="comma list of figure formats")
+    args = ap.parse_args()
+    tiers = [t.strip().upper() for t in args.primary_tiers.split(",") if t.strip()]
+    if not tiers or not set(tiers) <= {"A", "B", "C"}:
+        raise SystemExit(f"--primary-tiers must be a subset of A,B,C (got {args.primary_tiers!r})")
+    formats = tuple(f.strip() for f in args.formats.split(",") if f.strip())
     os.makedirs(args.outdir, exist_ok=True)
-
-    associations, _ = _load(args.associations, "ecology_associations")
-    viral,        _ = _load(args.viral,        "viral_summary")
-    master,       _ = _load(args.master,       "master_table")
-
-    plot_ecology_enrichment(associations, args.outdir)
-    plot_viral_rloop(viral, master, args.outdir)
+    assoc = load_table(args.associations, "ecology_associations")
+    viral = load_table(args.viral, "viral_summary")
+    master = load_table(args.master, "master_table")
+    n = plot_ecology_enrichment(assoc, args.outdir, formats)
+    utils.log(f"ecology_enrichment: {n} predictor(s) plotted")
+    plot_viral_rloop(viral, master, assoc, args.outdir, formats, tiers)
 
 
 if __name__ == "__main__":

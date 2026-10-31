@@ -1,10 +1,28 @@
 """Extract Prometheus candidates from DefenseFinder's Prometheus system calls.
 
-Detection is DefenseFinder-only (no PADLOC, no custom HMM sweep). DefenseFinder
-applies its MacSyFinder genetic-architecture rule before emitting a system, so a
-called Prometheus system already satisfies the model's mandatory-gene requirement;
-this script simply collects the proteins of those systems for downstream
-validation (architecture, phylogenetic placement, context, tiering).
+Detection is DefenseFinder-only (no PADLOC, no custom HMM sweep). DefenseFinder applies
+its MacSyFinder genetic-architecture rule before emitting a system, so a called
+Prometheus system already satisfies the model's mandatory-gene requirement
+(defense-finder-models Prometheus.xml: one mandatory gene `Prometheus__ProA`,
+min_mandatory_genes_required=1).
+
+Output format (defense-finder v2.0.x/v3.0.0, defense_finder_posttreat):
+  *_defense_finder_systems.tsv : sys_id, type, subtype, activity, sys_beg, sys_end,
+                                 protein_in_syst, genes_count, name_of_profiles_in_sys
+  *_defense_finder_genes.tsv   : MacSyFinder 2.1.4 TsvSystemSerializer columns
+                                 (replicon, hit_id, gene_name, hit_pos, model_fqn, sys_id,
+                                 ..., hit_i_eval, hit_score, hit_profile_cov, hit_seq_cov,
+                                 ...) + type, subtype, activity
+  where type/subtype are the last two components of model_fqn
+  (defense-finder-models/DefenseFinder/Prometheus/Prometheus -> Prometheus/Prometheus).
+
+Selection: a system matches when its type OR subtype EQUALS --system (case-insensitive;
+no substring matching). Candidates are the proteins of its genes whose gene_name equals
+--gene (default "<system>__ProA"; pass --gene "" to take every gene of the system).
+Genomes are taken from --samples (the analysis genome set), never from whatever
+directories happen to exist under --df-dir. Every candidate protein must exist in the
+combined proteome; a missing one is an id mismatch (e.g. ingested DefenseFinder output
+run on a different proteome) and fails the step.
 """
 import os
 import sys
@@ -14,120 +32,120 @@ import utils
 import argparse
 import pandas as pd
 
-SOURCES_HEADER = "protein_id\tgenome_id\tdetect_defensefinder\tdf_score\tdf_subtype"
+SOURCES_COLUMNS = ["protein_id", "genome_id", "detect_defensefinder", "df_score",
+                   "df_subtype",
+                   # additive (design 1.1: system instance, profile, i-evalue, coverage)
+                   "df_sys_id", "df_gene_name", "df_i_eval", "df_profile_cov", "df_seq_cov"]
+SOURCES_HEADER = "\t".join(SOURCES_COLUMNS[:5])     # SCHEMA base columns (compatibility)
 RAW_HEADER = "protein_id\tgenome_id\tmethod\tscore\tsubtype"
+SYSTEMS_REQUIRED = {"sys_id", "type", "subtype"}
+GENES_REQUIRED = {"hit_id", "sys_id"}
 
 
-def load_pmap(pmap_path: str):
-    """Load protein_map.tsv -> dict (genome_id, orig_id) -> protein_id."""
-    mapping = {}
-    try:
-        df = pd.read_csv(pmap_path, sep="\t")
-    except Exception as exc:
-        utils.log(f"WARNING: could not read pmap ({exc}); falling back to make_protein_id")
-        return mapping
+class InputError(RuntimeError):
+    pass
+
+
+def load_pmap(pmap_path: str) -> dict:
+    """protein_map.tsv -> {(genome_id, orig_id): protein_id} (required, never optional)."""
+    df = pd.read_csv(pmap_path, sep="\t", dtype=str, keep_default_na=False)
     needed = {"genome_id", "orig_id", "protein_id"}
-    if not needed.issubset(set(df.columns)):
-        utils.log(f"WARNING: pmap missing columns {needed - set(df.columns)}; "
-                  "falling back to make_protein_id")
-        return mapping
-    for _, row in df.iterrows():
-        mapping[(str(row["genome_id"]), str(row["orig_id"]))] = str(row["protein_id"])
-    return mapping
+    if not needed.issubset(df.columns):
+        raise InputError(f"{pmap_path} lacks columns {sorted(needed - set(df.columns))}")
+    return {(g, o): p for g, o, p in zip(df["genome_id"], df["orig_id"], df["protein_id"])}
 
 
-def lookup_pid(pmap, genome_id, orig_id):
-    key = (genome_id, orig_id)
-    return pmap.get(key, utils.make_protein_id(genome_id, orig_id))
-
-
-def parse_defensefinder(df_dir: str, system: str, pmap: dict):
-    """Return (hits, total_systems_all_types, n_genome_dirs).
-
-    hits = list of (protein_id, genome_id, score, subtype) for matching systems.
-    total_systems_all_types counts EVERY DefenseFinder system row across all genomes
-    (any type), which the caller uses to distinguish "tool ran, Prometheus genuinely
-    absent" from "tool produced nothing" (a broken detector / wrong model set).
-    """
-    hits = []
-    total_systems_all_types = 0
-    n_genome_dirs = 0
+def genome_list(samples: str, df_dir: str) -> list:
+    if samples:
+        df = pd.read_csv(samples, sep="\t", dtype=str, keep_default_na=False, comment="#")
+        if "genome_id" not in df.columns:
+            raise InputError(f"{samples} has no genome_id column")
+        return [g.strip() for g in df["genome_id"] if g.strip()]
+    # legacy behaviour (no --samples): every genome directory under df_dir
     if not df_dir or not os.path.isdir(df_dir):
-        return hits, total_systems_all_types, n_genome_dirs
+        return []
+    return sorted(d for d in os.listdir(df_dir) if os.path.isdir(os.path.join(df_dir, d)))
 
-    for genome_id in os.listdir(df_dir):
-        gdir = os.path.join(df_dir, genome_id)
-        if not os.path.isdir(gdir):
+
+def read_table(path: str, required: set, kind: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        raise InputError(f"missing DefenseFinder {kind} table {path}")
+    df = pd.read_csv(path, sep="\t", dtype=str, keep_default_na=False)
+    df.columns = [c.strip() for c in df.columns]
+    if not required.issubset(df.columns):
+        raise InputError(f"{path} lacks required {kind} columns "
+                         f"{sorted(required - set(df.columns))} (header: {list(df.columns)})")
+    return df
+
+
+def as_float(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_defensefinder(df_dir: str, system: str, gene: str, pmap: dict, genomes: list):
+    """Return (hits, total_systems_all_types, n_genomes).
+
+    hits: dicts with protein_id, genome_id, score, subtype, sys_id, gene_name, i_eval,
+    profile_cov, seq_cov -- one per matching DefenseFinder gene row.
+    """
+    sys_l, gene_l = system.strip().lower(), gene.strip().lower()
+    hits, total, missing = [], 0, []
+    for g in genomes:
+        gdir = os.path.join(df_dir, g)
+        sdf = read_table(os.path.join(gdir, f"{g}_defense_finder_systems.tsv"),
+                         SYSTEMS_REQUIRED, "systems")
+        total += len(sdf)
+        match = sdf[(sdf["type"].str.strip().str.lower() == sys_l)
+                    | (sdf["subtype"].str.strip().str.lower() == sys_l)]
+        if match.empty:
             continue
-        n_genome_dirs += 1
-        sys_file = os.path.join(gdir, f"{genome_id}_defense_finder_systems.tsv")
-        gene_file = os.path.join(gdir, f"{genome_id}_defense_finder_genes.tsv")
-
-        matching_sys_ids = set()
-        try:
-            sdf = pd.read_csv(sys_file, sep="\t")
-            sdf.columns = [c.strip() for c in sdf.columns]
-        except Exception as exc:
-            # A genome with a real Prometheus must never be silently dropped:
-            # warn loudly so a malformed systems file is visible, not swallowed.
-            utils.log(f"WARNING: could not read systems file for '{genome_id}' "
-                      f"({exc}); this genome is skipped — inspect {sys_file}")
-            continue
-        total_systems_all_types += len(sdf)
-        # type OR subtype, case-insensitive substring (handles 'Prometheus',
-        # 'PrometheusTypeI', etc. across DefenseFinder model-name variants).
-        sys_lower = system.lower()
-        for _, row in sdf.iterrows():
-            t = str(row.get("type", "")).lower()
-            st = str(row.get("subtype", "")).lower()
-            if sys_lower in t or sys_lower in st:
-                matching_sys_ids.add(str(row.get("sys_id", "")).strip())
-
-        if not matching_sys_ids:
-            continue
-
-        try:
-            gdf = pd.read_csv(gene_file, sep="\t")
-            gdf.columns = [c.strip() for c in gdf.columns]
-        except Exception as exc:
-            # The systems file DID call a Prometheus system here, so losing the
-            # genes file silently would drop a real locus. Warn explicitly.
-            utils.log(f"WARNING: '{genome_id}' has a matching {system} system but its "
-                      f"genes file could not be read ({exc}); inspect {gene_file}")
-            continue
-
-        if "hit_id" not in gdf.columns:
-            utils.log(f"WARNING: '{genome_id}' genes file lacks a 'hit_id' column; "
-                      f"cannot map proteins for its {system} system(s) — inspect {gene_file}")
-            continue
-
-        for _, row in gdf.iterrows():
-            sid = str(row.get("sys_id", "")).strip()
-            if sid not in matching_sys_ids:
+        sub_of = dict(zip(match["sys_id"].str.strip(), match["subtype"].str.strip()))
+        gdf = read_table(os.path.join(gdir, f"{g}_defense_finder_genes.tsv"),
+                         GENES_REQUIRED, "genes")
+        rows = gdf[gdf["sys_id"].str.strip().isin(sub_of)]
+        if gene_l and "gene_name" in rows.columns:
+            rows = rows[rows["gene_name"].str.strip().str.lower() == gene_l]
+        if rows.empty:
+            raise InputError(f"genome {g}: {len(sub_of)} {system} system(s) in the systems "
+                             f"table but no matching gene rows (gene_name == '{gene}') in "
+                             "the genes table")
+        for r in rows.to_dict("records"):
+            hid = str(r.get("hit_id", "")).strip()
+            if not hid:
+                raise InputError(f"genome {g}: {system} gene row without hit_id")
+            pid = pmap.get((g, hid))
+            if pid is None:
+                missing.append(f"{g}:{hid}")
                 continue
-            orig_id = str(row.get("hit_id", "")).strip()
-            if not orig_id or orig_id.lower() == "nan":
-                continue  # no protein id -> nothing to extract; do not emit genome__
-            score = row.get("hit_score", "")
-            try:
-                score = float(score)
-            except (ValueError, TypeError):
-                score = None
-            subtype = ""
-            try:
-                smatch = sdf[sdf["sys_id"].astype(str).str.strip() == sid]
-                if not smatch.empty:
-                    subtype = str(smatch.iloc[0].get("subtype", ""))
-            except Exception:
-                pass
-            pid = lookup_pid(pmap, genome_id, orig_id)
-            hits.append((pid, genome_id, score, subtype))
+            hits.append({
+                "protein_id": pid, "genome_id": g,
+                "score": as_float(r.get("hit_score")),
+                "subtype": sub_of.get(str(r["sys_id"]).strip(), ""),
+                "sys_id": str(r["sys_id"]).strip(),
+                "gene_name": str(r.get("gene_name", "")).strip(),
+                "i_eval": as_float(r.get("hit_i_eval")),
+                "profile_cov": as_float(r.get("hit_profile_cov")),
+                "seq_cov": as_float(r.get("hit_seq_cov")),
+            })
+    if missing:
+        raise InputError(
+            f"{len(missing)} DefenseFinder {system} hit_id(s) are absent from the pipeline "
+            f"proteome (protein_map.tsv), e.g. {missing[:5]}. The DefenseFinder output was "
+            "produced on different protein ids (ingested output from another gene call, or "
+            "a renamed proteome). Re-run DefenseFinder on genes/{g}/{g}.faa.")
+    return hits, total, len(genomes)
 
-    return hits, total_systems_all_types, n_genome_dirs
+
+def fmt(v):
+    return "" if v is None else v
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--df-dir", required=True)
     ap.add_argument("--proteome", required=True)
     ap.add_argument("--pmap", required=True)
@@ -138,78 +156,77 @@ def main():
     ap.add_argument("--out-candidates", required=True)
     ap.add_argument("--out-sources", required=True)
     ap.add_argument("--out-raw", required=True)
+    ap.add_argument("--samples", default="",
+                    help="analysis genome table (genome_id); default: every dir in --df-dir")
+    ap.add_argument("--gene", default=None,
+                    help="gene_name of the candidate protein within the system "
+                         "(default '<system>__ProA'; '' = every gene of the system)")
     args = ap.parse_args()
+    gene = f"{args.system}__ProA" if args.gene is None else args.gene
 
     for path in (args.out_candidates, args.out_sources, args.out_raw):
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
 
-    pmap = load_pmap(args.pmap)
-    df_hits, total_systems, n_genome_dirs = parse_defensefinder(args.df_dir, args.system, pmap)
+    try:
+        pmap = load_pmap(args.pmap)
+        genomes = genome_list(args.samples, args.df_dir)
+        df_hits, total_systems, n_genomes = parse_defensefinder(
+            args.df_dir, args.system, gene, pmap, genomes)
+    except InputError as exc:
+        raise SystemExit(f"[parse_defensefinder] FATAL: {exc}")
 
     # --- strict detection sanity (complements the defensefinder_check preflight) ---
-    # A real run over archaeal species reps always carries SOME defense systems. If the
-    # proteome has sequences but DefenseFinder emitted zero systems of any type across
-    # every genome, the detector is broken (wrong models, failed runs) rather than the
-    # data being Prometheus-free; fail loudly instead of writing an empty catalog.
     strict = str(args.strict).strip().lower() in ("true", "1", "yes")
-    proteome_nonempty = (os.path.exists(args.proteome)
-                         and os.path.getsize(args.proteome) > 0
-                         and len(utils.fasta_ids(args.proteome)) > 0)
-    if strict and proteome_nonempty and n_genome_dirs > 0 and total_systems == 0:
-        utils.log(
-            "FATAL: DefenseFinder produced ZERO systems of any type across "
-            f"{n_genome_dirs} genome(s) despite a non-empty proteome. This indicates a "
-            "broken detector or wrong model set, not a Prometheus-free dataset. "
-            "Check workflow/envs/defensefinder.yaml (defense-finder >= 2.0.0) and that "
-            "`defense-finder update` installed models >= 2.0.0. Set "
+    n_prot = len(pmap)
+    if strict and n_prot > 0 and n_genomes > 0 and total_systems == 0:
+        raise SystemExit(
+            "[parse_defensefinder] FATAL: DefenseFinder produced ZERO systems of any type "
+            f"across {n_genomes} genome(s) / {n_prot} proteins. This indicates a broken "
+            "detector or wrong model set, not a Prometheus-free dataset. Check the "
+            "defensefinder_check sentinel and the per-genome logs. Set "
             "prometheus.strict_detection=false to override (not recommended).")
-        sys.exit(1)
 
-    # best (score, subtype) per protein id
-    df_by_pid = {}
-    for pid, gid, score, subtype in df_hits:
-        if pid not in df_by_pid:
-            df_by_pid[pid] = (score, subtype)
+    # one row per protein: best (highest-scoring) DefenseFinder hit
+    best = {}
+    for h in df_hits:
+        cur = best.get(h["protein_id"])
+        if cur is None or (h["score"] or float("-inf")) > (cur["score"] or float("-inf")):
+            best[h["protein_id"]] = h
 
-    if not df_by_pid:
+    if not best:
         open(args.out_candidates, "w").close()
-        utils.write_empty(args.out_sources, SOURCES_HEADER)
+        utils.write_empty(args.out_sources, "\t".join(SOURCES_COLUMNS))
         utils.write_empty(args.out_raw, RAW_HEADER)
-        utils.log("No DefenseFinder Prometheus candidates found.")
+        utils.log(f"No DefenseFinder {args.system} candidates in {n_genomes} genome(s) "
+                  f"({total_systems} systems of any type).")
         return
 
-    # extract candidate sequences from the combined proteome
     proteome = dict(utils.read_fasta(args.proteome))
-    candidate_records = [(pid, proteome[pid]) for pid in sorted(df_by_pid) if pid in proteome]
-    utils.write_fasta(candidate_records, args.out_candidates)
+    absent = [p for p in best if p not in proteome]
+    if absent:
+        raise SystemExit(f"[parse_defensefinder] FATAL: {len(absent)} candidate(s) are in "
+                         f"protein_map.tsv but not in {args.proteome} (e.g. {absent[:3]}); "
+                         "the combined proteome is stale or truncated.")
+    utils.write_fasta([(p, proteome[p]) for p in sorted(best)], args.out_candidates)
 
-    # candidate_sources.tsv (DefenseFinder is the sole detector)
-    source_rows = []
-    for pid in sorted(df_by_pid):
-        score, subtype = df_by_pid[pid]
-        source_rows.append({
-            "protein_id": pid,
-            "genome_id": utils.genome_of(pid),
-            "detect_defensefinder": 1,
-            "df_score": score if score is not None else "",
-            "df_subtype": subtype,
-        })
-    pd.DataFrame(source_rows, columns=SOURCES_HEADER.split("\t")).to_csv(
+    pd.DataFrame([{
+        "protein_id": p, "genome_id": best[p]["genome_id"], "detect_defensefinder": 1,
+        "df_score": fmt(best[p]["score"]), "df_subtype": best[p]["subtype"],
+        "df_sys_id": best[p]["sys_id"], "df_gene_name": best[p]["gene_name"],
+        "df_i_eval": fmt(best[p]["i_eval"]), "df_profile_cov": fmt(best[p]["profile_cov"]),
+        "df_seq_cov": fmt(best[p]["seq_cov"]),
+    } for p in sorted(best)], columns=SOURCES_COLUMNS).to_csv(
         args.out_sources, sep="\t", index=False)
 
-    # raw_hits.tsv (one row per DefenseFinder gene hit)
-    raw_rows = [{
-        "protein_id": pid, "genome_id": gid, "method": "defensefinder",
-        "score": score if score is not None else "", "subtype": subtype,
-    } for pid, gid, score, subtype in df_hits]
-    if raw_rows:
-        pd.DataFrame(raw_rows, columns=RAW_HEADER.split("\t")).to_csv(
-            args.out_raw, sep="\t", index=False)
-    else:
-        utils.write_empty(args.out_raw, RAW_HEADER)
+    pd.DataFrame([{
+        "protein_id": h["protein_id"], "genome_id": h["genome_id"], "method": "defensefinder",
+        "score": fmt(h["score"]), "subtype": h["subtype"],
+    } for h in df_hits], columns=RAW_HEADER.split("\t")).to_csv(
+        args.out_raw, sep="\t", index=False)
 
-    utils.log(f"DefenseFinder Prometheus candidates: {len(df_by_pid)} proteins "
-              f"across {len(set(utils.genome_of(p) for p in df_by_pid))} genomes.")
+    utils.log(f"DefenseFinder {args.system} candidates: {len(best)} proteins across "
+              f"{len(set(h['genome_id'] for h in best.values()))} of {n_genomes} genomes "
+              f"({total_systems} systems of any type).")
 
 
 if __name__ == "__main__":

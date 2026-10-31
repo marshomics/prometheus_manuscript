@@ -1,39 +1,50 @@
 #!/usr/bin/env Rscript
 # =====================================================================
-# Stage 5.5 -- ancestral gain/loss of Prometheus across the archaeal
-# species tree by stochastic character mapping (design Stage 5.5;
-# confounder #5/#9). This is the EVOLUTIONARY form of the association
-# question and the one least confounded by tip-level clade structure.
+# Stage 5.5 -- ancestral gain/loss of Prometheus on the rooted archaeal species tree
+# by stochastic character mapping, and the methanogen-gain enrichment test.
 #
-# phytools::make.simmap(tree, x, model='ARD', nsim) draws nsim stochastic
-# histories under ML-fitted asymmetric (all-rates-different) gain/loss
-# rates. Across the simulations we summarise:
-#   n_gains  (0->1 transitions, mean over sims)  = n_independent_acquisitions
-#   n_losses (1->0 transitions, mean over sims)
-#   rate_gain, rate_loss (from the fitted Q matrix)
+# Presence (Contract v2 item 6): for a tier set T and a genome's best validated tier
+# prometheus_tier (A > B > C, "" = no validated locus): PRESENT if the tier is in T,
+# ABSENT if "", EXCLUDED (tip dropped, counted) otherwise. --tiers gives the primary set;
+# --tiers-sensitivity (optional) repeats everything for a second set (rows tagged by the
+# additive tier_set column).
 #
-# Methanogen enrichment of gains: for each mapped history we count gains
-# that occur on branches leading into methanogen tips/clades (a branch is
-# "methanogen" if its child subtree is entirely methanogen). We compare the
-# observed mean gains-on-methanogen-branches to a PHYLOGENETICALLY STRUCTURED
-# null: the methanogen trait is simulated on the same tree under an Mk model
-# fit to the observed states (>=200 sims), which preserves the clustering of
-# methanogeny. Free tip-label shuffling is NOT used (it destroys that
-# clustering and makes the test anticonservative); it remains only as a clearly
-# labelled last-resort fallback if the Mk fit fails. One-sided enrichment p.
-#
-# Output (SCHEMA evolution/ancestral/gains_losses.tsv): rows
-#   n_gains, n_losses, rate_gain, rate_loss, n_independent_acquisitions,
-#   gains_on_methanogen_branches, expected_gains_methanogen, enrichment_p
-# columns: metric, value, note.
-# PLOT: {plot-prefix}.png/.svg -- densityMap (or simmap node pies) titled
-# with n_independent_acquisitions. Trivial input -> header-only TSV +
-# placeholder figure, quit(status=0).
+# Model (phytools; verified against 2.1.1 locally and the 2.3-0 source pinned in
+# rstats.yaml -- same make.simmap/fitMk/sim.Mk interfaces):
+#   * Mk model choice: fitMk ER vs ARD with the same root prior; ARD only when it lowers
+#     AIC by >= 2 (parsimony rule), otherwise ER.
+#   * make.simmap(tree, x, model, nsim, Q = --q-method ("empirical" = ML Q, the default;
+#     "mcmc" = Q sampled from its posterior), pi = --root-prior ("fitzjohn" default:
+#     FitzJohn et al. 2009 root weighting; "equal"; "estimated" = stationary)).
+#     make.simmap internally reorders the tree "cladewise", so every per-edge quantity is
+#     computed on the returned simmap trees, never on the input edge order.
+#   * n_gains / n_losses: mean 0->1 / 1->0 transitions per map (phytools::countSimmap).
+#   * n_independent_acquisitions: mean number of DISTINCT gain events (plus ancestral
+#     presence at the root) that seed >= 1 extant carrier with no intervening loss.
+#   * gains_on_methanogen_branches: mean gains on edges whose descendant tips are all
+#     methanogens. The trait is master$methanogen exactly as in the association tests:
+#     TRUE only for mcrA-defined methanogens; ANME, mcr 'other' (alkane oxidisers) and
+#     ambiguous/unplaced McrA hosts are FALSE (non-methanogen), which is conservative for
+#     the enrichment (a gain in such a clade never counts as a methanogen gain).
+#   * the presence derived from prometheus_tier is cross-checked against the master's
+#     prometheus_status_primary / _sensitivity columns when present (mismatch = error).
+#   * structured null: the methanogen trait is simulated on the same tree under its own
+#     fitted Mk model (ER/ARD by AIC, FitzJohn root prior), keeping only simulations whose
+#     methanogen-tip count is within --prevalence-tol of the observed one (rejection; the
+#     unconditional structured null is used, and labelled, if too few are accepted); the
+#     FIXED gain maps are rescored on each simulated trait. One-sided p = (k + 1)/(n + 1),
+#     k = #null >= observed. Free tip shuffling is never used.
+# Inputs that are genuinely too small (trivial tree, < 5 matched tips, presence or trait
+# invariant) give NA rows with an explanatory note; any other error exits non-zero.
+# Output columns: metric, value, note, tier_set (gains_losses.tsv); kind, value, tier_set
+# (null file). Plot: densityMap of presence (primary tier set).
 # =====================================================================
 
-suppressWarnings(suppressMessages({ library(optparse) }))
-
-OUT_COLS <- c("metric", "value", "note")
+suppressWarnings(suppressMessages({
+  library(optparse)
+  library(ape)
+  library(phytools)
+}))
 
 .script_path <- function() {
   ca <- commandArgs(trailingOnly = FALSE)
@@ -41,109 +52,244 @@ OUT_COLS <- c("metric", "value", "note")
   if (length(m)) return(normalizePath(sub("^--file=", "", m[1])))
   ""
 }
-.this_dir <- tryCatch(dirname(.script_path()), error = function(e) ".")
-if (is.na(.this_dir) || !nzchar(.this_dir)) .this_dir <- "."
-.theme_ok <- tryCatch({
-  suppressWarnings(suppressMessages(source(file.path(.this_dir, "plotting_theme.R"))))
-  TRUE
-}, error = function(e) FALSE)
+# plotting_theme.R sits next to this script (Rscript --file=...), or in the working
+# directory when the file is source()d with chdir = TRUE (unit tests).
+.theme <- Filter(file.exists, c(file.path(dirname(.script_path()), "plotting_theme.R"),
+                                file.path(getwd(), "plotting_theme.R")))
+if (!length(.theme)) stop("plotting_theme.R not found next to ancestral_states.R")
+source(.theme[1])
 
-# Fallback placeholder if the shared helper failed to load.
-.placeholder <- function(prefix, msg) {
-  if (.theme_ok && exists("placeholder_plot")) {
-    tryCatch(placeholder_plot(prefix, msg), error = function(e) NULL)
-  } else {
-    tryCatch({
-      grDevices::png(paste0(prefix, ".png"), width = 4, height = 2.2,
-                     units = "in", res = 300)
-      graphics::plot.new(); graphics::text(0.5, 0.5, msg); grDevices::dev.off()
-    }, error = function(e) NULL)
-    tryCatch({
-      grDevices::svg(paste0(prefix, ".svg"), width = 4, height = 2.2)
-      graphics::plot.new(); graphics::text(0.5, 0.5, msg); grDevices::dev.off()
-    }, error = function(e) NULL)
+OUT_COLS <- c("metric", "value", "note", "tier_set")
+METRICS <- c("n_gains", "n_losses", "rate_gain", "rate_loss", "n_independent_acquisitions",
+             "gains_on_methanogen_branches", "expected_gains_methanogen", "enrichment_p",
+             "n_tips_analysed", "n_tips_excluded_tier", "n_tips_present")
+
+as_flag <- function(x) {
+  s <- tolower(trimws(as.character(x)))
+  out <- rep(NA, length(s))
+  out[s %in% c("true", "1", "yes", "t")] <- TRUE
+  out[s %in% c("false", "0", "no", "f")] <- FALSE
+  out
+}
+
+parse_tiers <- function(s) {
+  t <- toupper(trimws(unlist(strsplit(as.character(s), "[,+;/ ]+"))))
+  t <- t[nzchar(t)]
+  if (!length(t) || !all(t %in% c("A", "B", "C")))
+    stop("invalid tier set '", s, "' (use letters A,B,C)")
+  sort(unique(t))
+}
+
+# Contract v2 item 6: 1 present, 0 absent, NA excluded.
+tier_presence <- function(tier, tiers) {
+  tier <- toupper(trimws(as.character(tier)))
+  tier[is.na(tier)] <- ""
+  bad <- !(tier %in% c("", "A", "B", "C"))
+  if (any(bad)) stop("unexpected prometheus_tier value(s): ",
+                     paste(unique(tier[bad]), collapse = ","))
+  ifelse(tier == "", 0L, ifelse(tier %in% tiers, 1L, NA_integer_))
+}
+
+na_rows <- function(note, tier_lab, extra = list()) {
+  d <- data.frame(metric = METRICS, value = NA_real_, note = note, tier_set = tier_lab,
+                  stringsAsFactors = FALSE)
+  for (k in names(extra)) d$value[d$metric == k] <- extra[[k]]
+  d
+}
+
+# ---- tree helpers (on the simmap edge order) -------------------------------
+descendant_all <- function(tree, tipvals) {
+  # tipvals: logical matrix ntip x nsim (rows in tree$tip.label order). Returns a logical
+  # matrix (Ntip + Nnode) x nsim: TRUE when every descendant tip is TRUE.
+  n <- Ntip(tree); nn <- n + tree$Nnode
+  out <- matrix(TRUE, nn, ncol(tipvals))
+  out[seq_len(n), ] <- tipvals
+  po <- ape::reorder.phylo(tree, "postorder", index.only = TRUE)
+  for (e in po) {
+    p <- tree$edge[e, 1]; c <- tree$edge[e, 2]
+    out[p, ] <- out[p, ] & out[c, ]
   }
+  out
 }
 
-write_header_only <- function(path) {
-  dir.create(dirname(path), showWarnings = FALSE, recursive = TRUE)
-  con <- file(path, "w"); writeLines(paste(OUT_COLS, collapse = "\t"), con); close(con)
-}
-
-as_logical_col <- function(x) {
-  s <- tolower(trimws(as.character(x))); s %in% c("true", "1", "yes", "t")
-}
-
-mrow <- function(metric, value, note = "") {
-  data.frame(metric = metric, value = value, note = note, stringsAsFactors = FALSE)
-}
-
-# Count 0->1 and 1->0 changes in one simmap tree from its $maps.
-# Returns list(gains, losses) and per-edge child-state (the state at the
-# tipward end of each edge) for the methanogen-branch test.
-count_changes <- function(smap) {
-  gains <- 0L; losses <- 0L
-  child_state <- character(nrow(smap$edge))
-  for (i in seq_along(smap$maps)) {
-    seg <- smap$maps[[i]]
-    st <- names(seg)
-    child_state[i] <- st[length(st)]
-    if (length(st) >= 2) {
-      for (j in 2:length(st)) {
-        a <- st[j - 1]; b <- st[j]
-        if (a == "0" && b == "1") gains <- gains + 1L
-        if (a == "1" && b == "0") losses <- losses + 1L
-      }
+edge_gain_means <- function(smaps) {
+  # mean number of 0->1 transitions on each edge over the maps
+  ne <- nrow(smaps[[1]]$edge)
+  g <- numeric(ne)
+  for (s in smaps) {
+    for (i in seq_len(ne)) {
+      st <- names(s$maps[[i]])
+      if (length(st) > 1) g[i] <- g[i] + sum(st[-length(st)] == "0" & st[-1] == "1")
     }
   }
-  list(gains = gains, losses = losses, child_state = child_state)
+  g / length(smaps)
 }
 
-# For each edge, is the descendant subtree entirely methanogen?
-# meth is a named 0/1 vector over tips.
-edge_into_methanogen <- function(tree, meth) {
-  ntip <- length(tree$tip.label)
-  # descendant tips per node via ape::prop.part-like; use phangorn-free approach
-  # Build children lists.
-  desc_tips <- vector("list", max(tree$edge))
-  # postorder: compute tip sets
-  # Initialise tips.
-  for (t in seq_len(ntip)) desc_tips[[t]] <- tree$tip.label[t]
-  # Children-before-parents ordering so each parent's tip set is complete
-  # by the time we reach it. reorder.phylo shares the tree's edge indexing,
-  # which is also the indexing of make.simmap's $maps (same tree object).
-  ord <- ape::reorder.phylo(tree, "postorder")
-  for (e in seq_len(nrow(ord$edge))) {
-    parent <- ord$edge[e, 1]; child <- ord$edge[e, 2]
-    if (is.null(desc_tips[[parent]])) desc_tips[[parent]] <- character(0)
-    if (child <= ntip) {
-      desc_tips[[parent]] <- c(desc_tips[[parent]], ord$tip.label[child])
+acquisitions_one <- function(s) {
+  # distinct gain events (or root presence) seeding >= 1 extant carrier, no later loss
+  tr <- s; n <- Ntip(tr)
+  ne <- nrow(tr$edge)
+  pe <- integer(n + tr$Nnode); pe[tr$edge[, 2]] <- seq_len(ne)   # parent edge of a node
+  seed <- character(ne)
+  for (e in ape::reorder.phylo(tr, "cladewise", index.only = TRUE)) {
+    st <- names(tr$maps[[e]]); k <- length(st)
+    if (st[k] != "1") { seed[e] <- NA; next }
+    z <- which(st == "0")
+    if (length(z)) {
+      seed[e] <- paste0(e, ":", max(z) + 1)
     } else {
-      desc_tips[[parent]] <- c(desc_tips[[parent]], desc_tips[[child]])
+      par <- tr$edge[e, 1]
+      seed[e] <- if (pe[par] == 0) "root" else seed[pe[par]]
     }
   }
-  # Now evaluate per edge of the ORIGINAL tree ordering.
-  res <- logical(nrow(tree$edge))
-  for (e in seq_len(nrow(tree$edge))) {
-    child <- tree$edge[e, 2]
-    tips_c <- if (child <= ntip) tree$tip.label[child] else desc_tips[[child]]
-    if (length(tips_c) == 0) { res[e] <- FALSE; next }
-    mv <- meth[tips_c]
-    res[e] <- all(!is.na(mv)) && all(mv == 1)
-  }
-  res
+  tip_e <- pe[seq_len(n)]
+  st_tip <- vapply(tip_e, function(e) { v <- names(tr$maps[[e]]); v[length(v)] }, "")
+  length(unique(seed[tip_e[st_tip == "1"]]))
 }
 
-# Count gains on methanogen-leading branches for one simmap.
-gains_on_meth <- function(smap, meth_edges) {
-  cnt <- 0L
-  for (i in seq_along(smap$maps)) {
-    if (!meth_edges[i]) next
-    st <- names(smap$maps[[i]])
-    if (length(st) >= 2) for (j in 2:length(st))
-      if (st[j - 1] == "0" && st[j] == "1") cnt <- cnt + 1L
+# Two-state Mk simulation, vectorised over replicates (closed-form P(t)).
+sim_binary <- function(tree, q01, q10, root_p1, nsim) {
+  n <- Ntip(tree); nn <- n + tree$Nnode
+  st <- matrix(FALSE, nn, nsim)
+  st[n + 1, ] <- runif(nsim) < root_p1
+  r <- q01 + q10
+  for (e in ape::reorder.phylo(tree, "cladewise", index.only = TRUE)) {
+    p <- tree$edge[e, 1]; c <- tree$edge[e, 2]; t <- tree$edge.length[e]
+    decay <- if (r > 0) 1 - exp(-r * t) else 0
+    p01 <- if (r > 0) q01 / r * decay else 0
+    p10 <- if (r > 0) q10 / r * decay else 0
+    u <- runif(nsim)
+    st[c, ] <- ifelse(st[p, ], u >= p10, u < p01)
   }
-  cnt
+  st[seq_len(n), , drop = FALSE]
+}
+
+fit_mk_aic <- function(tree, x, root_prior) {
+  fits <- list(ER = fitMk(tree, x, model = "ER", pi = root_prior),
+               ARD = fitMk(tree, x, model = "ARD", pi = root_prior))
+  aic <- vapply(fits, AIC, numeric(1))
+  best <- if (aic[["ARD"]] <= aic[["ER"]] - 2) "ARD" else "ER"
+  list(fit = fits[[best]], model = best, aic = aic)
+}
+
+q_rates <- function(fit) {
+  Q <- unclass(as.Qmatrix(fit))
+  c(q01 = Q["0", "1"], q10 = Q["1", "0"])
+}
+
+root_p1 <- function(fit, q) {
+  pi <- fit$pi
+  if (is.numeric(pi) && all(c("0", "1") %in% names(pi)) && is.finite(pi[["1"]]))
+    return(as.numeric(pi[["1"]]))
+  if (sum(q) > 0) return(as.numeric(q[["q01"]] / sum(q)))   # stationary distribution
+  0.5
+}
+
+analyse <- function(tree, master, tiers, opt, status_col = NULL) {
+  tier_lab <- paste(tiers, collapse = ",")
+  tip_ids <- ifelse(nzchar(master$tree_tip), master$tree_tip, master$genome_id)
+  pres <- setNames(tier_presence(master$prometheus_tier, tiers), tip_ids)
+  # The master table's own status column (scaffolds, same Contract v2 item 6 rule) must agree.
+  if (!is.null(status_col) && status_col %in% names(master)) {
+    st <- tolower(trimws(master[[status_col]]))
+    ref <- ifelse(st == "present", 1L, ifelse(st == "absent", 0L, ifelse(st == "excluded", NA_integer_, -1L)))
+    if (any(ref == -1L, na.rm = TRUE)) stop("unexpected values in master$", status_col)
+    bad <- xor(is.na(ref), is.na(pres)) | (!is.na(ref) & !is.na(pres) & ref != pres)
+    if (any(bad)) stop(sprintf("presence from prometheus_tier with tiers {%s} disagrees with master$%s for %d genome(s) (e.g. %s): the tier sets used by scaffolds and evolution differ",
+                               tier_lab, status_col, sum(bad), paste(head(tip_ids[bad], 3), collapse = ",")))
+  }
+  meth <- setNames(as_flag(master$methanogen), tip_ids)
+  on_tree <- intersect(tree$tip.label, names(pres))
+  n_excl <- sum(is.na(pres[on_tree]))
+  keep <- on_tree[!is.na(pres[on_tree])]
+  base <- list(n_tips_excluded_tier = n_excl, n_tips_analysed = length(keep))
+  message(sprintf("[%s] %d species-tree tips matched; %d excluded by the tier rule; %d analysed",
+                  tier_lab, length(on_tree), n_excl, length(keep)))
+  if (length(keep) < 5)
+    return(list(rows = na_rows(sprintf("not computed: %d analysable tips (< 5)", length(keep)),
+                               tier_lab, base)))
+  tr <- keep.tip(tree, keep)
+  x <- pres[tr$tip.label]
+  base$n_tips_present <- sum(x)
+  if (length(unique(x)) < 2)
+    return(list(rows = na_rows("not computed: presence invariant after the tier rule",
+                               tier_lab, base)))
+  xf <- setNames(factor(x, levels = c(0, 1)), tr$tip.label)
+
+  # ---- presence: model choice + stochastic maps ------------------------------
+  mk <- fit_mk_aic(tr, xf, opt$root_prior)
+  smaps <- make.simmap(tr, xf, model = mk$model, nsim = opt$nsim, Q = opt$q_method,
+                       pi = opt$root_prior, message = FALSE)
+  if (inherits(smaps, "simmap")) smaps <- structure(list(smaps), class = c("multiSimmap", "multiPhylo"))
+  ref <- smaps[[1]]
+  for (s in smaps) if (!identical(s$edge, ref$edge)) stop("simmap edge matrices differ between maps")
+  cs <- countSimmap(smaps, states = c("0", "1"), message = FALSE)
+  if (is.list(cs) && !is.null(cs$Tr)) cs <- cs$Tr      # single-map return shape
+  cs <- as.matrix(cs)
+  gains <- if ("0,1" %in% colnames(cs)) cs[, "0,1"] else rep(0, nrow(cs))
+  losses <- if ("1,0" %in% colnames(cs)) cs[, "1,0"] else rep(0, nrow(cs))
+  acq <- vapply(smaps, acquisitions_one, numeric(1))
+  Qs <- lapply(smaps, function(s) if (!is.null(s$Q)) s$Q else attr(s, "Q"))  # phytools stores $Q
+  if (any(vapply(Qs, is.null, logical(1)))) stop("simmap object carries no fitted Q")
+  rg <- mean(vapply(Qs, function(Q) Q["0", "1"], numeric(1)))
+  rl <- mean(vapply(Qs, function(Q) Q["1", "0"], numeric(1)))
+  qnote <- sprintf("%s Mk (AIC ER=%.2f ARD=%.2f; ARD needs dAIC>=2), Q=%s, root prior=%s, %d maps",
+                   mk$model, mk$aic[["ER"]], mk$aic[["ARD"]], opt$q_method, opt$root_prior, opt$nsim)
+
+  # ---- methanogen enrichment -------------------------------------------------
+  obs <- expv <- pval <- NA_real_
+  enote <- "not computed"; null_vals <- numeric(0)
+  mv <- meth[ref$tip.label]
+  if (anyNA(mv)) {
+    enote <- sprintf("not computed: methanogen status missing for %d tips", sum(is.na(mv)))
+  } else if (length(unique(mv)) < 2) {
+    enote <- "not computed: methanogen status invariant on the analysed tips"
+  } else {
+    gbar <- edge_gain_means(smaps)
+    child <- ref$edge[, 2]
+    obs_all <- descendant_all(ref, matrix(mv, ncol = 1))
+    obs <- sum(gbar * obs_all[child, 1])
+    mf <- setNames(factor(as.integer(mv), levels = c(0, 1)), ref$tip.label)
+    mmk <- fit_mk_aic(ref, mf, opt$root_prior)
+    q <- q_rates(mmk$fit); p1 <- root_p1(mmk$fit, q)
+    n_obs <- sum(mv); tol <- max(1, round(opt$prevalence_tol * n_obs))
+    acc <- list(); n_acc <- 0; n_tried <- 0
+    while (n_acc < opt$nnull && n_tried < opt$max_null_sims) {
+      b <- min(opt$batch, opt$max_null_sims - n_tried)
+      sims <- sim_binary(ref, q[["q01"]], q[["q10"]], p1, b)
+      n_tried <- n_tried + b
+      ok <- abs(colSums(sims) - n_obs) <= tol & colSums(sims) > 0 & colSums(sims) < Ntip(ref)
+      if (any(ok)) { acc[[length(acc) + 1]] <- sims[, ok, drop = FALSE]; n_acc <- n_acc + sum(ok) }
+    }
+    if (n_acc >= opt$min_accept) {
+      S <- do.call(cbind, acc)[, seq_len(min(n_acc, opt$nnull)), drop = FALSE]
+      cond <- sprintf("prevalence-matched (|n_meth - %d| <= %d; accepted %d of %d)", n_obs, tol,
+                      n_acc, n_tried)
+    } else {
+      S <- sim_binary(ref, q[["q01"]], q[["q10"]], p1, opt$nnull)
+      cond <- sprintf("UNCONDITIONAL (only %d of %d simulations matched the prevalence)", n_acc, n_tried)
+    }
+    D <- descendant_all(ref, S)
+    null_vals <- as.numeric(crossprod(D[child, , drop = FALSE], gbar))
+    expv <- mean(null_vals)
+    pval <- (sum(null_vals >= obs - 1e-12) + 1) / (length(null_vals) + 1)
+    enote <- sprintf("one-sided P(null >= observed) = (k+1)/(n+1), n=%d; methanogen trait simulated under its fitted %s Mk (q01=%.4g q10=%.4g, P(root=1)=%.3f), %s; gain maps held fixed",
+                     length(null_vals), mmk$model, q[["q01"]], q[["q10"]], p1, cond)
+  }
+  rows <- data.frame(
+    metric = METRICS,
+    value = c(mean(gains), mean(losses), rg, rl, mean(acq), obs, expv, pval,
+              base$n_tips_analysed, base$n_tips_excluded_tier, base$n_tips_present),
+    note = c(paste("mean 0->1 transitions per map;", qnote),
+             paste("mean 1->0 transitions per map;", qnote),
+             "Q[0,1] gain rate (mean over maps)", "Q[1,0] loss rate (mean over maps)",
+             sprintf("mean distinct gain events (or root presence) seeding >=1 extant carrier with no later loss (sd %.3f)", sd(acq)),
+             "mean gains on edges whose descendant tips are all methanogens",
+             "mean of the structured null", enote,
+             "species-tree tips analysed", sprintf("tips excluded: best tier outside {%s}", tier_lab),
+             sprintf("tips present (tier in {%s})", tier_lab)),
+    tier_set = tier_lab, stringsAsFactors = FALSE)
+  list(rows = rows, smaps = smaps, null = null_vals, obs = obs, n_acq = mean(acq))
 }
 
 main <- function() {
@@ -152,275 +298,88 @@ main <- function() {
     make_option("--master", type = "character"),
     make_option("--nsim", type = "integer", default = 1000),
     make_option("--seed", type = "integer", default = 12345),
+    make_option("--tiers", type = "character", default = "A"),
+    make_option("--tiers-sensitivity", type = "character", dest = "tiers_sens", default = ""),
+    make_option("--q-method", type = "character", dest = "q_method", default = "empirical"),
+    make_option("--root-prior", type = "character", dest = "root_prior", default = "fitzjohn"),
+    make_option("--nnull", type = "integer", default = 1000),
+    make_option("--prevalence-tol", type = "double", dest = "prevalence_tol", default = 0.1),
+    make_option("--max-null-sims", type = "integer", dest = "max_null_sims", default = 200000),
+    make_option("--min-accept", type = "integer", dest = "min_accept", default = 200),
+    make_option("--batch", type = "integer", default = 5000),
     make_option("--out", type = "character"),
     make_option("--out-null", type = "character", dest = "out_null", default = NULL),
     make_option("--plot-prefix", type = "character", dest = "plot_prefix")
   )
   opt <- parse_args(OptionParser(option_list = option_list))
+  for (k in c("tree", "master", "out", "plot_prefix"))
+    if (is.null(opt[[k]])) stop("--", gsub("_", "-", k), " is required")
+  if (!opt$q_method %in% c("empirical", "mcmc")) stop("--q-method must be empirical or mcmc")
+  if (!opt$root_prior %in% c("fitzjohn", "equal", "estimated")) stop("bad --root-prior")
   set.seed(opt$seed)
-
-  # The enrichment figure reads the null distribution; always emit at least a header
-  # so the file exists on every code path (trivial tree, early returns, success).
-  if (!is.null(opt$out_null)) {
-    dir.create(dirname(opt$out_null), showWarnings = FALSE, recursive = TRUE)
-    con <- file(opt$out_null, "w"); writeLines("kind\tvalue", con); close(con)
+  dir.create(dirname(opt$out), showWarnings = FALSE, recursive = TRUE)
+  tier_sets <- list(parse_tiers(opt$tiers))
+  if (nzchar(opt$tiers_sens)) {
+    ts <- parse_tiers(opt$tiers_sens)
+    if (!identical(ts, tier_sets[[1]])) tier_sets[[2]] <- ts
   }
 
-  tryCatch({
-    stopifnot(!is.null(opt$tree), !is.null(opt$master), !is.null(opt$out),
-              !is.null(opt$plot_prefix))
+  master <- read.delim(opt$master, sep = "\t", colClasses = "character", na.strings = character(0),
+                       check.names = FALSE)
+  need <- c("genome_id", "prometheus_tier", "methanogen")
+  miss <- setdiff(need, names(master))
+  if (length(miss)) stop("master table lacks column(s): ", paste(miss, collapse = ", "))
+  if (!"tree_tip" %in% names(master)) master$tree_tip <- ""
+  master$genome_id <- trimws(master$genome_id); master$tree_tip <- trimws(master$tree_tip)
 
-    suppressWarnings(suppressMessages({
-      library(ape); library(readr); library(dplyr)
+  tree_txt <- trimws(paste(readLines(opt$tree, warn = FALSE), collapse = ""))
+  trivial <- !nzchar(tree_txt) || grepl("^\\(\\s*\\)\\s*;?$", tree_txt)
+  res <- list()
+  if (trivial) {
+    for (t in tier_sets) res[[length(res) + 1]] <- list(rows = na_rows("not computed: trivial species tree",
+                                                                        paste(t, collapse = ",")))
+  } else {
+    tree <- read.tree(opt$tree)
+    if (!is.rooted(tree)) stop("species tree is not rooted; ancestral reconstruction needs the rooted ",
+                               "tree written by scaffolds/root_tree.py")
+    if (anyDuplicated(tree$tip.label)) stop("duplicated tip labels in the species tree")
+    if (!is.binary(tree)) tree <- multi2di(tree, random = FALSE)
+    if (is.null(tree$edge.length)) stop("species tree has no branch lengths")
+    tree$edge.length[!is.finite(tree$edge.length) | tree$edge.length <= 0] <- 1e-6
+    scol <- c("prometheus_status_primary", "prometheus_status_sensitivity")
+    for (i in seq_along(tier_sets)) res[[i]] <- analyse(tree, master, tier_sets[[i]], opt, scol[i])
+  }
+  out <- do.call(rbind, lapply(res, `[[`, "rows"))
+  write.table(out, opt$out, sep = "\t", quote = FALSE, row.names = FALSE, na = "NA")
+
+  if (!is.null(opt$out_null)) {
+    nd <- do.call(rbind, lapply(seq_along(res), function(i) {
+      r <- res[[i]]; lab <- paste(tier_sets[[i]], collapse = ",")
+      d <- data.frame(kind = character(0), value = numeric(0), tier_set = character(0))
+      if (length(r$null)) d <- rbind(d, data.frame(kind = "sim", value = r$null, tier_set = lab))
+      if (!is.null(r$obs) && is.finite(r$obs)) d <- rbind(d, data.frame(kind = "observed", value = r$obs, tier_set = lab))
+      d
     }))
+    if (is.null(nd) || !nrow(nd)) nd <- data.frame(kind = character(0), value = numeric(0), tier_set = character(0))
+    write.table(nd, opt$out_null, sep = "\t", quote = FALSE, row.names = FALSE)
+  }
 
-    tree_txt <- tryCatch(paste(readLines(opt$tree, warn = FALSE), collapse = ""),
-                         error = function(e) "")
-    if (!nzchar(trimws(tree_txt)) || grepl("^\\(\\s*\\)\\s*;?$", trimws(tree_txt))) {
-      write_header_only(opt$out)
-      .placeholder(opt$plot_prefix, "Ancestral states: empty tree")
-      message("ancestral_states: trivial tree; header-only + placeholder.")
-      return(invisible(NULL))
-    }
-    tree <- tryCatch(read.tree(opt$tree), error = function(e) NULL)
-    # Safety net: make.simmap requires a rooted tree. The pipeline roots
-    # species_tree.treefile upstream; if an unrooted tree is ever passed in, apply a
-    # midpoint root rather than mapping gains/losses on an arbitrary root.
-    if (!is.null(tree) && length(tree$tip.label) >= 3 && !ape::is.rooted(tree))
-      tree <- tryCatch(phangorn::midpoint(tree), error = function(e) tree)
-    if (is.null(tree) || length(tree$tip.label) < 5) {
-      write_header_only(opt$out)
-      .placeholder(opt$plot_prefix, "Ancestral states: <5 tips")
-      message("ancestral_states: <5 tips; header-only + placeholder.")
-      return(invisible(NULL))
-    }
-
-    master <- readr::read_tsv(opt$master, show_col_types = FALSE, progress = FALSE)
-    if (nrow(master) == 0 || !"genome_id" %in% names(master)) {
-      write_header_only(opt$out)
-      .placeholder(opt$plot_prefix, "Ancestral states: empty master")
-      return(invisible(NULL))
-    }
-
-    # tip-keyed presence (0/1). tree_tip == genome_id for the species tree.
-    tt <- if ("tree_tip" %in% names(master)) trimws(as.character(master$tree_tip)) else ""
-    gid <- trimws(as.character(master$genome_id))
-    use_tip <- ifelse(nzchar(tt), tt, gid)
-    present <- as.integer(as_logical_col(master$prometheus_present))
-    meth <- as.integer(as_logical_col(master$methanogen))
-    names(present) <- use_tip; names(meth) <- use_tip
-
-    keep <- intersect(tree$tip.label, names(present))
-    keep <- keep[!duplicated(keep)]
-    if (length(keep) < 5) {
-      write_header_only(opt$out)
-      .placeholder(opt$plot_prefix, "Ancestral states: <5 matched tips")
-      return(invisible(NULL))
-    }
-    tree <- ape::keep.tip(tree, keep)
-    x <- present[tree$tip.label]
-    mvec <- meth[tree$tip.label]
-
-    if (length(unique(x)) < 2) {
-      write_header_only(opt$out)
-      .placeholder(opt$plot_prefix, "Ancestral states: presence invariant")
-      message("ancestral_states: no presence variation; header-only + placeholder.")
-      return(invisible(NULL))
-    }
-    if (!requireNamespace("phytools", quietly = TRUE)) {
-      write_header_only(opt$out)
-      .placeholder(opt$plot_prefix, "Ancestral states: phytools unavailable")
-      message("ancestral_states: phytools missing; header-only + placeholder.")
-      return(invisible(NULL))
-    }
-
-    # Ensure branch lengths for simmap; if absent, set unit lengths.
-    if (is.null(tree$edge.length) || all(is.na(tree$edge.length))) {
-      tree <- ape::compute.brlen(tree, 1)
-    }
-
-    nsim <- max(1L, as.integer(opt$nsim))
-    xf <- setNames(as.factor(x), tree$tip.label)
-
-    # ---- stochastic character mapping (ARD) ------------------------ #
-    smaps <- phytools::make.simmap(tree, xf, model = "ARD", nsim = nsim,
-                                   message = FALSE)
-    # Normalise to a multiSimmap list regardless of nsim. nsim==1 returns a
-    # single "simmap"; wrap it. Keep BOTH classes so densityMap() (which
-    # dispatches on multiPhylo) still accepts the object.
-    if (inherits(smaps, "simmap") && !inherits(smaps, "multiSimmap")) {
-      smaps <- structure(list(smaps), class = c("multiSimmap", "multiPhylo"))
-    } else if (!inherits(smaps, "multiPhylo")) {
-      class(smaps) <- c("multiSimmap", "multiPhylo")
-    }
-
-    # gains/losses per sim
-    gl <- lapply(smaps, count_changes)
-    gains_vec  <- vapply(gl, function(z) z$gains, numeric(1))
-    losses_vec <- vapply(gl, function(z) z$losses, numeric(1))
-    mean_gains  <- mean(gains_vec)
-    mean_losses <- mean(losses_vec)
-
-    # rates from fitted Q (average over sims' attached Q if present).
-    rate_gain <- NA_real_; rate_loss <- NA_real_
-    Qs <- lapply(smaps, function(s) attr(s, "Q"))
-    Qs <- Qs[!vapply(Qs, is.null, logical(1))]
-    if (length(Qs)) {
-      g <- vapply(Qs, function(Q) {
-        if (all(c("0", "1") %in% rownames(Q))) Q["0", "1"] else NA_real_
-      }, numeric(1))
-      l <- vapply(Qs, function(Q) {
-        if (all(c("0", "1") %in% rownames(Q))) Q["1", "0"] else NA_real_
-      }, numeric(1))
-      rate_gain <- mean(g, na.rm = TRUE); rate_loss <- mean(l, na.rm = TRUE)
-    }
-
-    # ---- methanogen enrichment of gains --------------------------- #
-    # Observed: gains landing on branches that lead into all-methanogen clades,
-    # averaged over the stochastic maps. The NULL must preserve the phylogenetic
-    # clustering of methanogeny -- methanogens sit in a few large clades, so free
-    # tip-label shuffling (the old approach) destroys that structure and makes the
-    # test anticonservative, exactly the non-independence problem the rest of the
-    # pipeline controls for. Instead we SIMULATE the methanogen trait on the SAME tree
-    # under an Mk model fit to the observed states, recompute methanogen branches per
-    # simulation, and rescore the FIXED gain maps. The gain placements are held fixed;
-    # only the methanogen-trait realisation is randomised, under a model that keeps its
-    # phylogenetic autocorrelation.
-    enrichment_p <- NA_real_
-    obs_meth_gains <- NA_real_; exp_meth_gains <- NA_real_
-    null_method <- "not_run"; null_means <- numeric(0)
-    if (length(unique(mvec)) >= 2 && !anyNA(mvec)) {
-      meth_named <- setNames(as.integer(mvec), tree$tip.label)
-      meth_edges <- tryCatch(edge_into_methanogen(tree, meth_named),
-                             error = function(e) rep(FALSE, nrow(tree$edge)))
-      obs_per_sim <- vapply(smaps, function(s) gains_on_meth(s, meth_edges), numeric(1))
-      obs_meth_gains <- mean(obs_per_sim)
-
-      nperm <- max(200L, nsim)
-      meth_factor <- setNames(as.factor(meth_named), tree$tip.label)
-
-      # Simulate nperm methanogen histories under a fitted Mk model (ARD, then ER).
-      sim_mat <- NULL
-      for (mk_model in c("ARD", "ER")) {
-        sim_mat <- tryCatch({
-          fit_mk <- phytools::fitMk(tree, meth_factor, model = mk_model)
-          Qmat <- phytools::as.Qmatrix(fit_mk)
-          s <- phytools::sim.Mk(tree, Qmat, nsim = nperm)
-          if (is.null(dim(s)))
-            s <- matrix(as.character(s), ncol = 1, dimnames = list(names(s), NULL))
-          s[tree$tip.label, , drop = FALSE]
-        }, error = function(e) NULL)
-        if (!is.null(sim_mat)) { null_method <- sprintf("Mk_simulation(%s)", mk_model); break }
-      }
-
-      score_null <- function(state_vec) {
-        permv <- setNames(as.integer(as.character(state_vec) == "1"), tree$tip.label)
-        me <- tryCatch(edge_into_methanogen(tree, permv),
-                       error = function(e) rep(FALSE, nrow(tree$edge)))
-        idx <- if (length(smaps) > 50) sample(seq_along(smaps), 50) else seq_along(smaps)
-        mean(vapply(smaps[idx], function(s) gains_on_meth(s, me), numeric(1)))
-      }
-
-      if (!is.null(sim_mat)) {
-        null_means <- vapply(seq_len(ncol(sim_mat)),
-                             function(j) score_null(sim_mat[, j]), numeric(1))
-      } else {
-        # Last-resort fallback (clearly labelled): the structured null could not be
-        # fit, so we revert to free tip-label permutation and FLAG it as weaker.
-        null_method <- "tip_label_permutation(FALLBACK: Mk null unavailable; anticonservative)"
-        null_means <- vapply(seq_len(nperm), function(p) score_null(sample(meth_named)),
-                             numeric(1))
-      }
-
-      exp_meth_gains <- mean(null_means)
-      # one-sided: P(null >= observed), with the standard +1 correction.
-      enrichment_p <- (sum(null_means >= obs_meth_gains) + 1) / (length(null_means) + 1)
-    }
-
-    n_indep <- mean_gains  # independent acquisitions = mean inferred gains
-
-    out <- rbind(
-      mrow("n_gains", round(mean_gains, 4),
-           sprintf("mean 0->1 over %d simmaps (ARD)", nsim)),
-      mrow("n_losses", round(mean_losses, 4),
-           sprintf("mean 1->0 over %d simmaps (ARD)", nsim)),
-      mrow("rate_gain", ifelse(is.na(rate_gain), NA_real_, round(rate_gain, 6)),
-           "Q[0,1] gain rate (mean over sims)"),
-      mrow("rate_loss", ifelse(is.na(rate_loss), NA_real_, round(rate_loss, 6)),
-           "Q[1,0] loss rate (mean over sims)"),
-      mrow("n_independent_acquisitions", round(n_indep, 4),
-           "mean independent gains across the archaeal tree"),
-      mrow("gains_on_methanogen_branches",
-           ifelse(is.na(obs_meth_gains), NA_real_, round(obs_meth_gains, 4)),
-           "observed mean gains on branches leading into methanogen clades"),
-      mrow("expected_gains_methanogen",
-           ifelse(is.na(exp_meth_gains), NA_real_, round(exp_meth_gains, 4)),
-           sprintf("null mean of gains on methanogen branches (%s)", null_method)),
-      mrow("enrichment_p",
-           ifelse(is.na(enrichment_p), NA_real_, signif(enrichment_p, 4)),
-           sprintf("one-sided P(null >= observed); >=200 sims; null=%s (phylogenetically structured)", null_method))
-    )
-
-    dir.create(dirname(opt$out), showWarnings = FALSE, recursive = TRUE)
-    readr::write_tsv(out, opt$out)
-
-    # ---- null distribution for the enrichment figure -------------- #
-    if (!is.null(opt$out_null)) {
-      # label the null rows 'sim' (NOT 'null' -- downstream pandas would read the
-      # literal string "null" as NaN and drop the whole distribution).
-      nd <- data.frame(kind = character(0), value = numeric(0), stringsAsFactors = FALSE)
-      if (length(null_means))
-        nd <- rbind(nd, data.frame(kind = "sim", value = null_means))
-      if (is.finite(obs_meth_gains))
-        nd <- rbind(nd, data.frame(kind = "observed", value = obs_meth_gains))
-      tryCatch(readr::write_tsv(nd, opt$out_null), error = function(e) invisible(NULL))
-    }
-
-    # ---- figure: densityMap of presence, titled by n_indep -------- #
-    title <- sprintf("Prometheus gains/losses (n independent acquisitions = %.2f)",
-                     n_indep)
-    drawn <- FALSE
+  prim <- res[[1]]
+  if (is.null(prim$smaps)) {
+    placeholder_plot(opt$plot_prefix, paste("Ancestral states:", prim$rows$note[1]))
+  } else {
+    sm <- prim$smaps; nt <- Ntip(sm[[1]])
     fig <- function() {
-      dm <- tryCatch(
-        phytools::densityMap(smaps, states = c("0", "1"), plot = FALSE,
-                             res = 200),
-        error = function(e) NULL)
-      if (!is.null(dm)) {
-        dm <- tryCatch(phytools::setMap(dm, c("#D9D9D9", "#0072B2")),
-                       error = function(e) dm)
-        plot(dm, lwd = 2, ftype = if (length(tree$tip.label) <= 60) "i" else "off",
-             fsize = 0.5, outline = FALSE, legend = FALSE)
-      } else {
-        # fallback: plot one simmap with node states
-        phytools::plotSimmap(smaps[[1]], colors = c("0" = "#D9D9D9", "1" = "#0072B2"),
-                             ftype = if (length(tree$tip.label) <= 60) "i" else "off",
-                             fsize = 0.5, lwd = 2)
-      }
-      graphics::title(main = title, cex.main = 0.8)
+      dm <- densityMap(sm, states = c("0", "1"), plot = FALSE, res = 200)
+      dm <- setMap(dm, c("#D9D9D9", "#0072B2"))
+      plot(dm, lwd = 2, ftype = if (nt <= 60) "i" else "off", fsize = 0.5, outline = FALSE,
+           legend = FALSE)
+      graphics::title(main = sprintf("P(Prometheus present), tiers {%s}; independent acquisitions = %.2f",
+                                     paste(tier_sets[[1]], collapse = ","), prim$n_acq), cex.main = 0.7)
     }
-    if (.theme_ok && exists("save_plot")) {
-      tryCatch({
-        h <- max(3, min(0.12 * length(tree$tip.label), 11))
-        save_plot(fig, opt$plot_prefix, width = 5.5, height = h)
-        drawn <- TRUE
-      }, error = function(e) message("ancestral_states: plot error: ", conditionMessage(e)))
-    }
-    if (!drawn) .placeholder(opt$plot_prefix, title)
-
-    message(sprintf("ancestral_states: n_indep=%.2f gains=%.2f losses=%.2f enrich_p=%s -> %s",
-                    n_indep, mean_gains, mean_losses,
-                    ifelse(is.na(enrichment_p), "NA", signif(enrichment_p, 3)), opt$out))
-    invisible(NULL)
-
-  }, error = function(e) {
-    message("ancestral_states: top-level error: ", conditionMessage(e))
-    tryCatch(write_header_only(opt$out), error = function(e2) invisible(NULL))
-    tryCatch(.placeholder(opt$plot_prefix, "Ancestral states: error"),
-             error = function(e2) invisible(NULL))
-    invisible(NULL)
-  })
-
-  quit(status = 0)
+    save_plot(fig, opt$plot_prefix, width = 5.5, height = max(3, min(0.12 * nt, 11)))
+  }
+  message("ancestral_states: wrote ", opt$out)
 }
 
-main()
+if (sys.nframe() == 0L) main()   # run as a script; source() only defines the functions

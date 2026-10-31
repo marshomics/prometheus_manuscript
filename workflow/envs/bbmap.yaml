@@ -1,9 +1,10 @@
 name: prometheus-bbmap
+# BBMap assembly statistics (rule bbmap_batch -> run_bbmap_stats.py, stdlib-only, which
+# drives statswrapper.sh format=6). pandas was unused and has been dropped.
 channels:
   - conda-forge
   - bioconda
 dependencies:
   - python=3.11
-  - bbmap=39.06          # provides statswrapper.sh / stats.sh
-  - pandas=2.2.2
+  - bbmap=39.06          # provides statswrapper.sh / stats.sh (pure Java)
   - openjdk=17

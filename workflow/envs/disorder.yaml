@@ -4,17 +4,33 @@ channels:
   - bioconda
 dependencies:
   - python=3.11
-  - pip=24.0
-  - pandas=2.2.2
-  - numpy=1.26.4
-  - biopython=1.83
-  # segmasker for low-complexity masking (disorder != low-complexity)
-  - blast=2.15.0
+  - pip=24.2
+  - pandas=2.2.3
+  - numpy=2.1.3            # metapredict 3.1.x requires numpy >= 2.0
+  - scipy=1.14.1           # metapredict 3.1.x requires scipy >= 1.13
+  - matplotlib-base=3.9.2
+  - tqdm
+  - requests
+  - urllib3
+  # CPU PyTorch from conda-forge: satisfies metapredict's torch >= 2.3 so pip does not
+  # pull the multi-GB CUDA wheel; predictions run with device='cpu' (bit-reproducible).
+  - pytorch=2.5.1=cpu_*
+  # metapredict ships linux-64 as an sdist whose Cython extension is REQUIRED
+  # (setup.py: "if it cannot be compiled the install fails"), so a C compiler must be
+  # present when the env is built.
+  - c-compiler
+  # segmasker (SEG low-complexity masking; disorder != low complexity). 2.17.0, not
+  # 2.15.0: bioconda blast 2.15.0 pins libzlib <1.3, which no current conda-forge
+  # PyTorch build accepts (the env does not solve); -outfmt interval is unchanged.
+  - blast=2.17.0
   - pip:
-      # metapredict v2/v3: CPU, proteome-scale consensus disorder predictor (pulls torch)
-      - metapredict==2.6.5
-      # alphaPredict: predicted AlphaFold pLDDT from sequence -> the installable
-      # fallback 2nd predictor. The GOLD-STANDARD 2nd predictor is IUPred3, which is
-      # license-gated (free academic, register + download) and staged via
-      # config disorder.iupred3_path -- not installable here.
-      - alphaPredict==1.2
+      - protfasta==0.1.26
+      - getSequence==3.0.1
+      # metapredict 3.1.1: default V3 disorder network (pinned again in the rule) and the
+      # bundled pLDDT V1 network = alphaPredict's alpha_fold_networkV7 (byte-identical),
+      # which is the installable fallback second predictor. The separate alphaPredict
+      # package is therefore not needed (and alphaPredict==1.2 conflicts with every
+      # metapredict 2.6x pin: 2.63 needs ==1.0, 2.65.x needs >=1.3.0). The independent
+      # second predictor, IUPred3, is licence-gated (free academic) and staged via
+      # config disorder.iupred3_path.
+      - metapredict==3.1.1

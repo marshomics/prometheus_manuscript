@@ -1,0 +1,19 @@
+name: prometheus-checkm2
+# CheckM2 completeness/contamination (rule checkm2_batch) in an isolated environment.
+# checkm2 1.0.2 (bioconda noarch) solves (micromamba, linux-64) to python 3.8.15,
+# numpy 1.19.2, tensorflow 2.4.0, lightgbm 3.2.1, scikit-learn 0.23.2 and DIAMOND 2.0.4;
+# those pins conflict with the python 3.11 / numpy 1.26.4 stack of the other envs, hence
+# this separate file.
+# Database: CheckM2 1.0.2 accepts DIAMOND DB versions <= 2 (zenodo 10.5281/zenodo.5571251,
+# checkm2/version/version_hashes_1.0.2.json); 1.1.0 adds DB version 3 (zenodo 14897628,
+# incompatible below 1.1.0). Both unpack to CheckM2_database/uniref100.KO.1.dmnd, so keep
+# db.checkm2 and this pin in step (download with `checkm2 database --download` from this env).
+# `checkm2 predict --database_path` sha256-checks the file and exits 1 on a DB that is not in
+# 1.0.2's table (checksum_version_validate_DIAMOND), so a mismatch fails checkm2_batch.
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - checkm2=1.0.2
+  - python=3.8
+  - diamond=2.0.4

@@ -1,16 +1,16 @@
 name: prometheus-qc
+# Stage-0 gene calling (rule prodigal_genes -> prodigal + rename_prodigal.py, which is
+# stdlib-only) and the Snakefile `provenance` rule.
+#
+# CheckM2 lives in its own environment (checkm2.yaml): bioconda checkm2=1.0.2 requires
+# python 3.8 / numpy 1.19.2 / tensorflow 2.4, which cannot be solved together with the
+# python 3.11 / numpy 1.26.4 stack used here. drep, barrnap, trnascan-se, assembly-stats,
+# seqkit and pyrodigal were never called by any rule and have been removed.
 channels:
   - conda-forge
   - bioconda
 dependencies:
   - python=3.11
-  - checkm2=1.0.2
-  - drep=3.5.0
-  - seqkit=2.8.2
-  - assembly-stats=1.0.1
-  - barrnap=0.9
-  - trnascan-se=2.0.12
   - prodigal=2.6.3
-  - pyrodigal=3.5.2
   - pandas=2.2.2
   - numpy=1.26.4

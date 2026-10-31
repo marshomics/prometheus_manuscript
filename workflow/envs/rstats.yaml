@@ -9,13 +9,27 @@ dependencies:
   - r-phytools=2.3_0
   - r-phylolm=2.6.5
   - r-caper=1.0.3
-  - r-geiger=2.0.11
   - r-nlme=3.1_165
   - r-phangorn=2.11.1
+  # corHMM 2.8 (fitCorrelationTest; methanogenesis_stats.R) is not on conda-forge: the
+  # CRAN source tarball is vendored (vendor/corHMM_2.8.tar.gz, SHA-256 checked) and
+  # installed by rstats.post-deploy.sh. Its dependencies, pinned to the versions a
+  # linux-64 dry-run solve selects against the pins above (MASS and nnet are not part
+  # of conda-forge r-base):
+  - r-nloptr=2.2.1
+  - r-gensa=1.1.14.1
+  - r-expm=1.0_0
+  - r-numderiv=2016.8_1.1
+  - r-corpcor=1.6.10
+  - r-viridis=0.6.5
+  - r-rmpfr=1.1_1
+  - r-igraph=2.1.4
+  - r-mass=7.3_60.0.1
+  - r-nnet=7.3_20
   # tree i/o + plotting
   - bioconductor-ggtree=3.10.0
   - bioconductor-treeio=1.26.0
-  - bioconductor-tidytree=0.4.6
+  - r-tidytree=0.4.6              # CRAN package (bioconductor-tidytree does not exist)
   - r-ggplot2=3.5.1
   - r-ggnewscale=0.4.10
   - r-patchwork=1.2.0

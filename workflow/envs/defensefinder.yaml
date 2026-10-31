@@ -4,17 +4,27 @@ channels:
   - bioconda
 dependencies:
   - python=3.11
-  # Prometheus first appears in defense-finder-models v2.0.0 (absent from <= 1.2.4),
-  # and v2.0.0+ models REQUIRE the defense-finder SOFTWARE at >= 2.0.0. Pinning an
-  # older binary (e.g. 1.3.0) silently detects zero Prometheus loci. Keep >= 2.0.0.
-  - defense-finder>=2.0.0
-  - macsyfinder>=2.1.4
+  # Exact pins (a floating `defense-finder>=2.0.0` resolves to whatever is newest).
+  # defense-finder 3.0.0 (2026-05-04) was released with defense-finder-models 3.x; its
+  # setup requires macsyfinder==2.1.4. Prometheus is in models >= 2.0.0 and its model
+  # (Prometheus.xml, Prometheus__ProA.hmm) is byte-identical in models 2.0.0-3.1.0.
+  # Keep prometheus.defensefinder_version (rule default "3.0.0") equal to this pin: the
+  # defensefinder_check preflight fails on any mismatch.
+  - defense-finder=3.0.0
+  - macsyfinder=2.1.4
   - hmmer=3.4
-  - prodigal=2.6.3
-  - pandas=2.2.2
-  # After env creation, install the PINNED models version (>= 2.0.0, contains
-  # Prometheus) instead of a floating update:
-  #   defense-finder update                                   # latest models, OR
-  #   macsydata install 'defense-finder-models==<prometheus.defensefinder_models_version>'
-  # The `defensefinder_check` rule verifies the software version AND that a
-  # Prometheus model is installed before any genome is searched.
+  - pandas=2.2.3
+  # Models are NOT part of the conda env. Install the pinned models version (default
+  # prometheus.defensefinder_models_pin "3.1.0") plus the pinned CasFinder (default
+  # prometheus.defensefinder_casfinder_pin "3.1.0"; DefenseFinder refuses to run without
+  # CasFinder) once, e.g. into a project directory, and point
+  # prometheus.defensefinder_models_dir at it:
+  #   macsydata install --target resources/db/defense-finder-models --org mdmparis \
+  #       'defense-finder-models==3.1.0'
+  #   macsydata install --target resources/db/defense-finder-models 'CasFinder==3.1.0'
+  # Do NOT use `defense-finder update`: it installs the LATEST models and CasFinder into
+  # ~/.macsyfinder/models, and CasFinder 3.1.1 uses model grammar vers="2.1", which
+  # macsyfinder 2.1.4 rejects ("version supported is '2.0'"). The preflight fails on any
+  # version other than the pins. It also runs a positive control: DefenseFinder must call
+  # Prometheus on the consensus of its own Prometheus__ProA profile before any genome is
+  # searched.

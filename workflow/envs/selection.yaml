@@ -9,3 +9,4 @@ dependencies:
   - biopython=1.83
   - pandas=2.2.2
   - numpy=1.26.4
+  - dendropy=4.6.1               # run_selection.py prunes the gene tree to the tested loci

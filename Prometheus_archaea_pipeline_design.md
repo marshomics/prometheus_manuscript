@@ -93,7 +93,7 @@ Every box becomes one Snakemake module with explicit input and output files. The
 
 ## 5. Stage 1 — Prometheus identification, validation, and curation
 
-> **Implementation note (current pipeline).** Detection is restricted to DefenseFinder's Prometheus calls. The PADLOC cross-check and the custom HMM sweep described in 1.5–1.6 below are not run. The downstream validation (domain architecture, phylogenetic separation from cellular paralogs, defense-island context, confidence tiers) is unchanged; tier A correspondingly rests on the full canonical four-domain architecture plus Prometheus placement and intact catalytic modules, rather than on agreement across detectors.
+> **Implementation note (current pipeline).** Detection is restricted to DefenseFinder's Prometheus calls. The PADLOC cross-check and the custom HMM sweep described in 1.5–1.6 below are not run. The downstream validation (domain architecture, phylogenetic separation from cellular paralogs, defense-island context, confidence tiers) is unchanged; tier A correspondingly rests on the required core architecture in canonical order (DUF4011 → SF1 helicase → REase_MTES_1575; DUF3320 is recorded but optional, being absent from ~54% of Prometheus) plus supported Prometheus placement and intact catalytic modules, rather than on agreement across detectors. See §19 for every place the implementation departs from this design.
 
 This is the crux. DNA2 is, in its cellular role, an essential replication and repair enzyme; archaea run much of that chemistry through NurA (nuclease) and HerA (helicase) rather than a DNA2 fusion, but DNA2-family homologs and other helicase-nuclease proteins exist and can trip a homology search. A Prometheus catalog built on raw DefenseFinder hits will contain both false positives (housekeeping paralogs, partial hits) and false negatives (real systems missed by strict architecture rules or split across contig boundaries). Stage 1 produces a curated, confidence-tiered catalog instead.
 
@@ -173,7 +173,7 @@ This stage builds the three coordinate systems every association rests on: a sta
 
 *3.3 Metabolic classification, defining "methanogen" from genes.* Annotate each genome for energy metabolism with **METABOLIC**, **DRAM**, or curated KO/Pfam HMM sets, and specifically detect the methanogenesis machinery: `mcrABG` (and `mcrCD`), the Wood–Ljungdahl/methyl-branch markers, methyltransferases (`mtaA/mtbA/mttB` families), and the relevant hydrogenases. Assign:
 - methanogen vs non-methanogen (presence of a credible Mcr complex), and
-- methanogenesis subtype where present: hydrogenotrophic, acetoclastic, methylotrophic, methyl-reducing/H2-dependent.
+- methanogenesis subtype where present: hydrogenotrophic, acetoclastic, methylotrophic, methyl-reducing/H2-dependent. *(As implemented, these are five independent indicators rather than one category, because many methanogens run several pathways at once; see §19.)*
 - Flag **anaerobic methanotrophs (ANME)**, which carry divergent `mcr` but run it in reverse; they must not be silently counted as methanogens.
 Defining the trait from `mcr` rather than from the order name keeps the predictor independent of the GTDB taxonomy used in the association test, and it captures methyl-reducing methanogens in lineages outside the classical orders (e.g., within Thermoproteota). Record both the gene-based call and the taxonomy-based expectation, and reconcile disagreements manually.
 
@@ -416,3 +416,56 @@ It can't, on its own, show that archaeal Prometheus is an active anti-viral syst
 - Ho L.S.T. & Ané C. phylolm; Pagel M. & Meade A. BayesTraits; Fritz S.A. & Purvis A. D statistic. — Phylogenetic comparative methods.
 - Borrel G., Adam P.S., Gribaldo S., et al. on methanogen polyphyly and the evolution of methanogenesis (Euryarchaeota split into Halobacteriota/Methanobacteriota/Thermoplasmatota; methyl-reducing methanogens in Thermoproteota). — Trait-definition rationale for Stage 3.3.
 - Camargo A.P., et al. geNomad (2024); Nayfach S., et al. CheckV (2021). — Provirus identification and quality.
+
+---
+
+## 19. As implemented — where the pipeline departs from this design
+
+This document is the rationale; the code is authoritative. The table lists every place the
+implemented pipeline (README.md, `workflow/scripts/SCHEMA.md`) differs from the text above.
+These differences were established in the pipeline review, whose changes are recorded in
+`REVIEW_CHANGES.md`. "Not implemented" items are candidates for future work; no implemented
+analysis assumes them.
+
+| § | Design | As implemented |
+|---|---|---|
+| 0.1 | Provenance incl. assembly level and isolate vs MAG, modeled | Only the metadata `source` column is carried; MAG/isolate type is never used. Quality enters as completeness, contamination, contig count and N50. |
+| 0.2 | seqkit/assembly-stats; barrnap + tRNAscan-SE for MIMAG | BBMap `statswrapper.sh` assembly statistics. rRNA/tRNA are not called. |
+| 0.3 | Quality tiers carried as covariates; hard floor 50 / 10 | Phase 1 applies a hard filter (completeness ≥ 90, contamination ≤ 5, < 1000 contigs, N50 > 5 kb, score > 50). The MIMAG-style tier (no rRNA/tRNA criterion) is computed, but every representative is high quality after the filter, so tiers are not a covariate. Completeness enters the models directly. |
+| 0.4 | dRep at 95% ANI | One representative per GTDB species (highest quality score, deterministic tie-breaks). |
+| 0.5 | Prodigal (archaeal mode) or Bakta | Prodigal 2.6.3, single mode, translation table 11 (Prodigal has no archaeal mode; table 11 is the prokaryotic code). Meta mode is used for assemblies < 20 kb and recorded. |
+| 1.2 | hmmscan + InterProScan; DNA2 module = RecB-family nuclease + SF1B helicase; four-domain canonical form | hmmscan against Pfam-A only (`--cut_ga`), matched exactly (accession, then name). The required core is DUF4011 → SF1 helicase (AAA_11/12/19/30) → REase_MTES_1575 in that order. DUF3320 is recorded, not required. No separate RecB-family nuclease domain is required. |
+| 1.3 | Align to the *Pseudomonas* Prometheus and inspect catalytic residues | Residues are read from hmmscan's own alignments to each Pfam consensus: Walker A / motif I and motif II in the helicase, and the conserved acidic residues of the MTES (Vsr-like) fold. PF18741 has no canonical (D/E)xK; these residues are putative and not experimentally mapped for ProA. |
+| 1.5 | Context: defense systems, MGEs, integrases; PADLOC | Other DefenseFinder systems' genes within ±10 ORFs on the same contig only. No MGE or integrase markers, no PADLOC. Context can only raise confidence (tier B). |
+| 1.6 | Orthogonal HMM sweep + PADLOC; detection-sensitivity covariate | Not run. `detection_sensitivity.tsv` records, per genome, the DefenseFinder call vs validated presence; no model has a sensitivity covariate. Known limit: DefenseFinder's `--cut_ga` (per-domain GA 600) misses a ProA whose alignment splits into sub-threshold domain hits (e.g. UniProt A0A0A6X990). Prevalence therefore means "detected by DefenseFinder". |
+| 1.7 | Fragmentation → "present-fragmented" | Prodigal partial flags. Fragmented loci are retained but cannot reach tier A, so under the tier rule they are *excluded* from tier-A analyses, never counted as absent. |
+| 1.8 | Tier A needs defense context and ≥ 2 detectors; Rejected also for "lacks defense signal" | A = DefenseFinder call + required core in order + supported Prometheus placement + catalytic intact + not fragmented + length in [min_len, max_len]. B = supported placement, or core + defense context. C = the rest. Rejected = supported paralog placement, or a complete ORF < 0.5 × min_len or > 2 × max_len. Missing defense context never rejects. |
+| 2.1 | Methanogen-only / mixed subfamily clusters | Not implemented (graded MMseqs2 subfamilies + rarefaction only). |
+| 2.4 | Context-type clustering (clinker, cblaster; `context_types.tsv`) | Not implemented. |
+| 2.5 | Length, locus GC vs host, codon usage | Not implemented (length is in the catalog). |
+| 3.2 | Reference-anchored and de novo trees; saturation checks; optional chronogram | De novo tree only: GTDB-Tk ar53 MSA → IQ-TREE 2 two-step PMSF (LG+F+G guide → LG+C20+F+G), UFBoot + SH-aLRT. No reference-anchored tree, saturation assessment or chronogram. Rooting needs an outgroup and fails without one by default; midpoint is used only on opt-in, and the choice is recorded. |
+| 3.3 | METABOLIC/DRAM; methanogenesis subtype; mcrCD and methyltransferases; reconcile with taxonomy | mcrA/B/G HMM search at the KOfam `ko_list` thresholds (McrA required), with ANME separated by McrA placement. **Subtype implemented** (opt-in `methanogenesis.enabled`): 85 pathway KOs searched at the same KofamScan thresholds, with pyrrolysine/selenocysteine read-through, structured by the verbatim KEGG module definitions (M00567/M00357/M00356/M00563/M00880) into five multi-label, three-valued pathway calls plus substrate flags; absence is gated on completeness. The taxonomy expectation is reconciled when `methanogenesis.taxonomy_expectation` is given (disagreements listed, never overridden). Not done: METABOLIC/DRAM themselves; methoxydotrophy has no KEGG module (one-sided flag only). |
+| 3.4 | ENVO mapping, physicochemistry, BioSample/GOLD augmentation | Curated binary `group_*` / `niche_*` columns from the input metadata, unioned per species, with unknown cells kept NA (corrected in the review) and counted in `ecology_missingness.tsv`. `ecology.envo_map` is a legacy key and is ignored (logged). No augmentation. |
+| 4.4 | BayesTraits (Bayes factors) | `phytools::fitPagel` (ML, ARD, LR test), exploratory. |
+| 6.2 | Within methanogens: does the methanogenesis subtype predict presence? Fit type and habitat jointly, report partial effects | **Implemented** (opt-in, `methanogenesis.enabled`): `methanogenesis_stats.R` fits, per pathway indicator, a marginal and a habitat-adjusted phyloglm (the primary partial effect; habitat terms chosen by |phi| under an events-per-variable budget, VIF guard), a stochastic-mapping replication guard that withholds p-values when the trait has too few independent origins (Maddison & FitzJohn 2015), the corHMM hidden-rate correlation test, and four pre-specified sensitivity re-fits. BH within an always-exploratory `methanogenesis` registry family, over the primary rows only. |
+| 4.5 | Covariates incl. the detection-sensitivity flag; optional NB model of defense count | z(completeness), z(log genome size) and z(log1p defense count excluding Prometheus). The NB background model is not implemented. |
+| 4.6 | Phylogeny-aware co-occurrence correcting for genome size | `fitPagel` per system + Fisher direction, FDR across systems; no genome-size term. |
+| 5.1 | Separate mixture-model gene tree; outgroup-rooted with paralogs | One IQ-TREE run (ModelFinder, UFBoot2 + SH-aLRT) on the validated proteins only, left unrooted. GeneRax infers the root, and the tanglegram midpoint-roots it for display only. |
+| 5.2 | Per-domain tanglegrams, RF, AU | RF distances, supported conflicts and AU tests per domain (`rf_distances.tsv`). The AU p-values are not entered in the registry (treat them as exploratory). |
+| 5.3 | GeneRax + ALE (UFBoot distribution) | GeneRax UndatedDTL; its transfer fraction is confirmatory (no p-value). ALE is optional, off by default, and its binaries are not in the env. |
+| 5.4 | Compositional HGT signals | Not implemented. |
+| 5.5 | Count + stochastic mapping + BadiRate | Stochastic mapping only (`make.simmap`). Gain enrichment on methanogen lineages is tested against an Mk-structured null (confirmatory). |
+| 5.6 | Codon alignments per subfamily/domain | One family codon alignment of catalytically intact loci (genetic code 11); per-site results are mapped to domains in `site_table.tsv`. RELAX contrasts methanogen clades (confirmatory). |
+| 6.1 | ENVO, oxygen, temperature, salinity, host | Whatever binary niche columns the metadata provides. |
+| 6.2 | Methanogen niche resolution | Not implemented. |
+| 6.3–6.4 | geNomad + CheckV; QmRLFS-style R-loops | geNomad 1.8.0 + CheckV 1.0.3. The R-loop step is a re-implementation of QmRLFS-finder v2.0 (models m1 + m2), checked call-for-call against the reference program. |
+| 7.1 | iTOL/ggtree; tanglegram annotated with transfers | ggtree master tree; the tanglegram carries no transfer annotation. |
+| 7.2 | One FDR regime; pre-registered: methanogen association, HGT fraction, independent-acquisition count | Families: association, ancestral, reconciliation, selection, co-occurrence, ecology, disorder. One method per family (BH by default); baselines and sensitivity rows are kept out of the FDR. Confirmatory: `association:phyloglm_confounders:methanogen`; the methanogen-gain enrichment (the raw acquisition count is descriptive); `selection:RELAX:K`; `reconciliation:generax:transfer`. Disorder is always exploratory. The opt-in bacterial/cross-domain tests are not registered. |
+| 7.3 | Sensitivity battery | Tier A vs A+B (prevalence, association, ecology). "Without low-completeness genomes" is moot after the Phase-1 filter. Reference-anchored vs de novo tree and dereplicated vs full set are not implemented. |
+| 7.4 | Reproducibility package | Pinned per-rule conda envs (13), config schema validation, fixed seeds, `results/provenance/versions.txt`. |
+| §12 | Confounder table | Row 1: completeness covariate + tier rule. Row 2: contig taxonomic consistency is not checked. Row 3: no orthogonal sweep / sensitivity covariate (see 1.6). Row 5: fitPagel instead of BayesTraits. Row 9: no compositional signals. |
+| §15 | Tooling | Not used: seqkit/assembly-stats, barrnap, tRNAscan-SE, dRep, Bakta, PADLOC, InterProScan, clinker, cblaster, METABOLIC/DRAM, ENVO, treePL, BayesTraits, BMGE, Count, BadiRate, iTOL, Snakemake report. Used in addition: BBMap, FAMSA, MMseqs2 `easy-cluster`, the QmRLFS-finder re-implementation, and in the opt-in modules metapredict, IUPred3 and segmasker. |
+
+Beyond this design, the pipeline adds two opt-in modules (README §8–§9): a
+bacterial / cross-domain branch (origin and direction of transfer, matched comparison, and
+the R-loop mechanism test in bacteria) and an intrinsic-disorder comparison.

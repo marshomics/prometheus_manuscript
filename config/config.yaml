@@ -35,6 +35,7 @@ preprocess:
     min_quality_score: 50.0       # keep quality_score > this
   # quality_score = completeness - (5 * contamination)
   keep_domain: "Archaea"          # after GTDB-Tk, keep only this domain (d__Archaea); "" disables the domain filter
+  checkm2_extra: "--remove_intermediates"   # extra `checkm2 predict` flags (CheckM2 1.0.2, envs/checkm2.yaml)
   niche_aggregation: "all"        # union group_*/niche_* over "all" input genomes of the species | "passing"
   unclassified_species: "drop"    # novel/unassigned GTDB species (empty s__) are DROPPED | "singleton"
   bbmap:                          # BBMap statswrapper.sh format=6 column names (parsed by header)
@@ -52,30 +53,38 @@ seed: 12345                          # global RNG seed for reproducibility
 
 # ---- Reference databases (provide these; see resources/README.md) -----
 db:
-  checkm2: "resources/db/checkm2/uniref100.KO.1.dmnd"
-  gtdbtk_data: "resources/db/gtdbtk"           # GTDB-Tk reference data dir
+  checkm2: "resources/db/checkm2/CheckM2_database/uniref100.KO.1.dmnd"   # the .dmnd FILE written by `checkm2 database --download --path resources/db/checkm2` (DB version <= 2 for CheckM2 1.0.2)
+  gtdbtk_data: "resources/db/gtdbtk"           # GTDB-Tk reference data dir (release R220 for GTDB-Tk 2.4.0)
   pfam_hmm: "resources/db/pfam/Pfam-A.hmm"     # pressed Pfam-A (hmmpress)
-  interproscan: ""                              # optional: path to interproscan.sh
-  kofam_profiles: "resources/db/kofam/profiles"
-  kofam_ko_list: "resources/db/kofam/ko_list"
-  genomad: "resources/db/genomad_db"
-  checkv: "resources/db/checkv-db"
+  kofam_ko_list: "resources/db/kofam/ko_list"  # KOfam ko_list: curated per-KO score thresholds for the mcr search
+                                              # (the profiles themselves are read from refs.mcr_hmm_dir)
+  kofam_profiles: "resources/db/kofam/methanogenesis_profiles"   # KOfam profiles of the methanogenesis rules'
+                                              # KOs (fetch_kofam_subset.py); only read when methanogenesis.enabled
+  genomad: "resources/db/genomad_db"           # dir made by `genomad download-database resources/db`
+  checkv: "resources/db/checkv-db-v1.5"        # dir made by `checkv download_database resources/db`
 
 # ---- Reference sequence sets (provide these; see resources/README.md) --
 refs:
   prometheus_faa: "resources/refs/prometheus_reference.faa"   # validated Prometheus (incl. P. aeruginosa, van den Berg 2024); used for the validation tree
   paralog_faa: "resources/refs/paralog_reference.faa"         # housekeeping outgroup: DNA2, NurA, HerA, other helicase-nucleases
-  mcr_hmm_dir: "resources/refs/mcr_hmm"                       # mcrA/mcrB/mcrG profile HMMs (KOfam or TIGRFAM)
+  mcr_hmm_dir: "resources/refs/mcr_hmm"                       # *.hmm for every methanogen.mcr_kos: KOfam K00399.hmm,
+                                                              # K00401.hmm, K00402.hmm (KO from NAME/ACC or file stem);
+                                                              # thresholds from db.kofam_ko_list, else the HMM GA lines
   mcrA_ref_aln: "resources/refs/mcrA_reference.afa"           # curated McrA alignment incl. ANME references
   mcrA_ref_labels: "resources/refs/mcrA_reference_labels.tsv" # ref_id<TAB>group(methanogen|ANME|other)
 
 # ---- Quality control --------------------------------------------------
 qc:
-  completeness_floor: 50.0       # genomes below this are excluded from primary presence/absence
-  contamination_ceiling: 10.0    # genomes above this are excluded from primary presence/absence
-  tier_high_completeness: 90.0   # MIMAG "high-quality" threshold for tier A genomes
+  # Per-genome QC flags of qc/genome_metadata.tsv. pass_primary = completeness >=
+  # completeness_floor AND contamination <= contamination_ceiling; quality_tier A = MIMAG
+  # high quality (tier_high_*). With the Phase-1 defaults (>= 90 / <= 5) every analysed
+  # representative is pass_primary and quality tier A.
+  completeness_floor: 50.0
+  contamination_ceiling: 10.0
+  tier_high_completeness: 90.0   # MIMAG "high-quality" thresholds for quality tier A
   tier_high_contamination: 5.0
-  prodigal_mode: "single"        # consistent gene calls; "meta" only if many short contigs
+  prodigal_mode: "single"        # consistent gene calls; genomes < 20,000 bp fall back to -p meta
+  prodigal_translation_table: 11 # Prodigal -g (archaea/bacteria); recorded per gene in genes.tsv transl_table
 
 # (Dereplication / dRep removed: preprocessing already collapses to one
 #  representative per GTDB species, so no dRep or extra QC is run before analysis.)
@@ -89,37 +98,64 @@ prometheus:
   # Prometheus first appears in defense-finder-models v2.0.0 (verified against the
   # model registry's Release_updates.tsv). Pin the models version and require the
   # matching software (>= 2.0.0); the defensefinder_check rule fails fast otherwise.
-  defensefinder_models_version: "2.0.0"   # minimum models version that contains Prometheus
+  defensefinder_models_version: "2.0.0"   # MINIMUM models version that contains Prometheus (the exact pin is below)
+  defensefinder_version: "3.0.0"          # exact defense-finder software version (envs/defensefinder.yaml)
+  defensefinder_models_pin: "3.1.0"       # exact defense-finder-models release installed for the run
+  defensefinder_casfinder_pin: "3.1.0"    # exact CasFinder release (3.1.1 needs a newer macsyfinder grammar)
+  defensefinder_models_dir: ""            # models root from `macsydata install --target ...` ("" = macsyfinder default search path)
+  defensefinder_positive_control: true    # preflight: run DefenseFinder on the ProA HMM consensus, must call Prometheus
+  defensefinder_gene: "Prometheus__ProA"  # mandatory gene of the Prometheus model
   defensefinder_min_software: "2.0.0"     # minimum defense-finder software version
   strict_detection: true               # FAIL (not silent) if DefenseFinder returns zero systems of ANY type
+  validation_tree_model: "MFP"         # IQ-TREE model for the validation (placement) tree
+  placement_min_alrt: 80               # placement clade must have SH-aLRT >= this ...
+  placement_min_ufboot: 95             # ... and UFBoot >= this, else the candidate is Unplaced
   min_len_aa: 800                      # length sanity bounds (canonical ~2221 aa)
   max_len_aa: 3000
-  # Domain architecture is detected by NAME from InterProScan/Pfam output
-  # (robust to Pfam release drift). Accessions optional; VERIFY against your release.
+  # Domain architecture from hmmscan --cut_ga vs Pfam-A. Matching is EXACT: a hit
+  # belongs to a category when its Pfam accession (version suffix ignored) is listed,
+  # or else when its Pfam ID (hmmscan target name) equals a listed name. No substring
+  # matching (the old "AAA"/"helicase" substrings matched unrelated AAA+ ATPases).
+  # KEY ORDER = canonical N->C order of ProA, verified by hmmscan of UniProt ProA
+  # homologues and of the DefenseFinder Prometheus__ProA HMM consensus:
+  #   DUF4011 -> SF1 helicase (AAA_11/AAA_12, often split by an insertion) -> REase_MTES -> DUF3320
+  # `required` = needed for the canonical core used by tiering. DUF3320 is absent in
+  # ~54% of Prometheus instances (van den Berg et al. 2024, Cell Host Microbe), so it
+  # is recorded but not required. There is no separate "nuclease" category: the
+  # nuclease of ProA is the REase_MTES_1575 domain (PF18741, Pfam ID "MTES_1575"), a
+  # Vsr-like REase fold without a canonical (D/E)xK motif (catalytic check: SCHEMA.md).
   domains:
-    DUF4011:  { names: ["DUF4011"], accessions: ["PF13195"] }
-    DUF3320:  { names: ["DUF3320"], accessions: [] }            # detect by name; verify accession
-    DNA2:     { names: ["DNA2", "AAA", "PIF1", "helicase"], accessions: [] }
-    nuclease: { names: ["RecB", "PD-(D/E)XK", "nuclease"], accessions: [] }
-    REase:    { names: ["restriction", "REase", "MTES", "endonuclease"], accessions: [] }
+    DUF4011:  { names: ["DUF4011"], accessions: ["PF13195"], required: true }
+    DNA2:     { names: ["AAA_11", "AAA_12", "AAA_19", "AAA_30"],      # DNA2/UPF1-like SF1 helicase core (COG1112)
+                accessions: ["PF13086", "PF13087", "PF13245", "PF13604"], required: true }
+    REase:    { names: ["MTES_1575"], accessions: ["PF18741"], required: true }   # REase_MTES_1575
+    DUF3320:  { names: ["DUF3320"], accessions: ["PF11784"], required: false }
   context_window: 10                   # +/- ORFs scanned for defense-island signal
 
 # ---- Diversity --------------------------------------------------------
 diversity:
   mmseqs_identities: [0.30, 0.50, 0.70, 0.90]
   mmseqs_coverage: 0.60
+  mmseqs_cov_mode: 0                   # MMseqs2 --cov-mode 0: coverage of query AND target
+  mmseqs_sensitivity: 7.5              # MMseqs2 -s (high sensitivity for 30%-identity subfamilies)
+  rarefaction_permutations: 200        # permutations for the subfamily rarefaction envelope
 
 # ---- Reference scaffolds ----------------------------------------------
 tree:
-  scope: "focal"            # "focal" = user genomes only; "domain" = + GTDB references
+  scope: "focal"            # "focal" = species tree of your genomes only; "domain" = inferred WITH the GTDB
+                            #   ar53 reference genomes (better-resolved deep nodes) and then pruned to your
+                            #   genomes. "domain" is heavy (default resources 128 GB / 7 days).
   marker_set: "ar53"        # GTDB archaeal markers
   gtdbtk_classify_extra: "--skip_ani_screen"   # GTDB-Tk 2.4+; adjust for your version
   # --- rooting (the species tree is rooted before any comparative/ancestral use) ---
   rooting_method: "outgroup"   # "outgroup" (preferred, defensible) | "midpoint" (heuristic fallback)
+  outgroup_on_failure: "fail"  # outgroup absent / not monophyletic: "fail" (stop) | "midpoint" (labelled fallback)
+  min_perc_aa: 10              # GTDB-Tk align: genomes with < this % of MSA columns are dropped (reported in gtdbtk_dropped.tsv)
   outgroup: []                 # genome_ids forming the outgroup clade — SET THIS for a defensible root
   outgroup_taxon: ""           # OR a GTDB taxon (e.g. "p__Altiarchaeota") resolved via the taxonomy table
   iqtree_model: "MFP"       # ModelFinder Plus for the de novo focal tree
   pmsf: true                # two-step PMSF for deep-node robustness
+  pmsf_guide_model: "LG+F+G" # PMSF step 1 guide tree (IQ-TREE PMSF documentation)
   pmsf_model: "LG+C20+F+G"
   ufboot: 1000
   alrt: 1000
@@ -128,46 +164,120 @@ methanogen:
   # "Methanogen" is defined from genes, not taxonomy (methanogens are polyphyletic).
   mcr_kos: ["K00399", "K00401", "K00402"]   # KEGG: K00399=mcrA, K00401=mcrB, K00402=mcrG
   mcr_required: ["K00399"]                   # McrA (K00399) is the diagnostic minimum
-  kofam_score_fraction: 0.5                  # accept hits >= fraction * KOfam adaptive threshold
+  kofam_score_fraction: 1.0                  # accept hits >= fraction * KOfam threshold (KofamScan rule = 1.0)
+  partial_score_fraction: 0.5                # rescue ONLY contig-edge fragments (Prodigal partial flag) at >= this
+                                             # fraction of the threshold; null disables the rescue
   anme_via_mcrA_tree: true                   # separate methanogens from ANME by McrA placement
+
+# ---- Methanogenesis pathway capacity (design 3.3; opt-in) -------------
+# Needs the KOfam profile subset for the rules' 85 KOs; stage it with
+#   python workflow/scripts/py/fetch_kofam_subset.py --rules <rules> \
+#       --out-dir resources/db/kofam/methanogenesis_profiles --ko-list resources/db/kofam/ko_list
+# Adds results/scaffolds/metabolism/methanogenesis_{ko_hits,pathways,reconciliation}.tsv, the
+# master-table mgen_* columns and results/ecology/methanogenesis_associations.tsv.
+methanogenesis:
+  enabled: false
+  rules: "workflow/resources/methanogenesis/rules/methanogenesis_rules.yaml"
+  readthrough: true          # recover genes Prodigal truncated at an in-frame UAG (pyrrolysine)
+                             # or UGA (selenocysteine); see rules/RULES.md section 3
+  absence_alpha: 0.05        # call a pathway absent only when P(missed | completeness) <= this
+  # taxonomy_expectation: ""   # optional rank/taxon expectation table; disagreements are written
+                               # to methanogenesis_reconciliation.tsv for manual review
+  stats:
+    # Predictors are the master's mgen_* columns; habitat "auto" = every group_*/niche_* column.
+    predictors: ["mgen_co2_reducing", "mgen_acetoclastic", "mgen_methylotrophic",
+                 "mgen_methyl_dismutating", "mgen_methyl_reducing"]
+    habitat: ["auto"]
+    covariates: ["completeness", "genome_size"]
+    primary_tiers: ["A"]         # response tier set (Contract v2 item 6); default = stats.confidence_tiers_primary
+    sensitivity_tiers: ["A", "B"]
+    min_n: 10                # minimum methanogens with a resolved call before a model is fitted
+    min_class: 3             # minimum genomes per predictor level
+    min_changes: 5           # minimum stochastic-mapping state changes before a p-value is given
+    nsim: 100                # make.simmap simulations
+    corhmm: true             # corHMM hidden-rate correlation test
+    epv_min: 10              # events per variable (Peduzzi et al. 1996)
+    vif_max: 5               # refuse a partial effect whose VIF exceeds this
+    complete_threshold: 95   # completeness floor of the sens_complete_only sensitivity analysis
 
 # ---- Evolution --------------------------------------------------------
 evolution:
-  align_tool: "mafft"           # mafft (L-INS-i) for the family; FAMSA fallback for large sets
-  trim_tool: "clipkit"          # kpic-smart-gap
+  align_tool: "mafft"           # mafft = MAFFT L-INS-i up to linsi_max_seqs, FAMSA above; famsa = FAMSA always
+  linsi_max_seqs: 200
+  trim_tool: "clipkit"          # clipkit | none (an unknown value fails)
+  clipkit_mode: "kpic-smart-gap"
   gene_tree_model: "MFP"
-  per_domain_trees: true
+  per_domain_trees: true        # per-domain trees vs the family tree (RF, UFBoot>=95 conflicts, AU test)
+  domain_tree_model: "MFP"      # default = gene_tree_model
+  domain_min_taxa: 6            # a domain tree needs >= this many sequences
+  codon_table: 11               # NCBI table for PAL2NAL and the CDS checks (archaeal/bacterial GTG/TTG starts)
+  max_cds_drop_frac: 0.05       # codon_align FAILS if more validated loci than this lack a consistent CDS
   reconciliation:
     run_generax: true
     generax_model: "UndatedDTL"
+    generax_strategy: "SPR"     # SPR = joint gene-tree correction (GeneRax default) | EVAL = reconcile the fixed tree
+    subst_model: "LG+G4"        # GeneRax per-family substitution model
     run_ale: false              # ALE optional (heavier install); GeneRax is primary
+    ale_samples: 100
   ancestral:
-    method: "simmap"            # phytools stochastic mapping (pure R, reproducible)
+    method: "simmap"            # phytools stochastic mapping (the only implemented method)
     nsim: 1000
+    q_method: "empirical"       # make.simmap Q: empirical = ML Q (ER or ARD chosen by AIC) | mcmc = Q from its posterior
+    root_prior: "fitzjohn"      # root-state prior (FitzJohn et al. 2009)
+    nnull: 1000                 # accepted simulations of the prevalence-matched structured null
+    prevalence_tol: 0.1         # null simulations must match the observed prevalence within this
   selection:
     run: true
     methods: ["FEL", "MEME", "BUSTED", "aBSREL", "RELAX"]
-    relax_partition: "methanogen"   # RELAX test set = terminal methanogen branches
+    relax_partition: "methanogen"   # methanogen = RELAX Test = branches whose descendants are all methanogens,
+                                    # Reference = all-non-methanogen branches; none = skip RELAX
+    relax_labelling: "clade"        # clade (root-invariant; ANME/ambiguous/unplaced hosts Unclassified) | terminal
+    gard: false                     # true: HyPhy GARD recombination screen before the tests
+    gard_mode: "Faster"             # Faster | Normal
     intact_only: true               # restrict dN/dS to catalytically-intact loci
-    site_pvalue: 0.1                 # FEL/MEME per-site significance threshold (exploratory)
+    site_pvalue: 0.1                # FEL/MEME per-site significance threshold (exploratory)
 
 # ---- Ecology ----------------------------------------------------------
 ecology:
-  envo_map: "config/envo_map.tsv"   # optional curated free-text -> ENVO mapping
-  predictors: ["biome_envo", "oxygen", "temp_class", "salinity_class", "host_associated"]
+  # Predictors of the niche/viral phyloglm models (ecology_stats.R --predictors):
+  #   auto = every binary group_*/niche_* column of the Phase-1 species table; or a list of
+  #   group_*/niche_* column names / globs (e.g. ["niche_thermo*", "group_host_associated"]).
+  #   Names without the group_/niche_ prefix (e.g. the legacy ENVO fields) are dropped with a
+  #   warning; a requested group_/niche_ name absent from the master table is reported as a
+  #   row with an empty level.
+  predictors: auto
+  # Nuisance covariates added to every ecology model, each z-scored on its raw scale
+  # (the methanogen association model in association_tests.R uses z(log genome_size)).
+  # Temperature-proxy niche columns may be appended here for temperature-aware niche tests.
+  covariates: ["completeness", "genome_size"]
+  # LEGACY (read by no rule): ENVO mapping of the original design; kept for reference only.
+  envo_map: "config/envo_map.tsv"
+  genomad:
+    splits: 0          # geNomad --splits (0 = geNomad default); raise (e.g. 8) if MMseqs2 runs out of memory
   rloop:
-    riz_min_g: 3       # RLFS RIZ: runs of >=3 G
-    window: 100        # scan window (bp)
-    min_rlfs_score: 1  # minimum RLFS hits to call a provirus "R-loop-prone"
-    require_rez: true  # QmRLFS-style: a full RLFS needs RIZ + a downstream G-rich REZ
-                       # (false = permissive RIZ-only G-cluster mode)
+    # rloop_predict.py is a call-for-call re-implementation of QmRLFS-finder v2.0
+    # (Jenjaroenpun et al.; github.com/piroonj/QmRLFS-finder), searched on both strands.
+    models: ["m1", "m2"]  # QmRLFS RIZ models: m1 = G-runs of >= riz_min_g, m2 = >= riz_min_g + 1
+    riz_min_g: 3       # m1 G-run length (QmRLFS default 3; m2 uses riz_min_g + 1)
+    window: 100        # minimum REZ length in nt (QmRLFS window_step 100)
+    min_rlfs_score: 1  # merged RLFS loci needed to call a sequence "R-loop-prone"
+    require_rez: true  # true = QmRLFS (an RLFS is RIZ + linker + G-rich REZ);
+                       # false = permissive RIZ-only G-cluster mode (not QmRLFS)
 
 # ---- Statistics -------------------------------------------------------
 stats:
-  confidence_tiers_primary: ["A"]      # headline analyses; ["A","B"] reported as sensitivity
-  fdr_method: "BH"
+  confidence_tiers_primary: ["A"]      # headline analyses (presence = best tier in this set)
+  confidence_tiers_sensitivity: ["A", "B"]   # sensitivity set reported alongside (prevalence etc.)
+  # Tier rule (SCHEMA Contract v2 item 6): for a tier set T a genome is present if its best
+  # validated tier is in T, absent if it has no validated locus, and EXCLUDED (not counted
+  # as absent) if its best tier lies outside T.
+  fdr_method: "BH"                     # Benjamini-Hochberg within each registry family
   phyloglm_btol: 10
-  phyloglm_boot: 200
+  phyloglm_boot: 200                   # parametric-bootstrap replicates for the phyloglm CI
+  phylo_d_permutations: 1000           # caper::phylo.d permutations (D statistic p-value)
+  cooccurrence_min_count: 5            # a system is tested only with >= this many genomes with AND without it
+  confirmatory: []                     # 'family:test:term' keys; [] = the built-in pre-registered set
+  alpha: 0.05                          # significance level used for figure colouring
 
 # ---- Bacterial cross-domain branch (OPT-IN; never touches the archaeal run) ----
 # A parallel branch that ingests pre-computed bacterial DefenseFinder output and
@@ -196,7 +306,28 @@ bacteria:
   niche_metadata: ""             # TSV: genome_id + oxygen/biome/host labels -> activates the niche specificity control
   genomes_dir: ""                # dir of bacterial genome ASSEMBLIES (contigs) -> activates provirus + R-loop mechanism test
   genome_extension: "fasta"      # extension of the assemblies in genomes_dir ({genome_id}.<ext>)
-  system: "Prometheus"           # DefenseFinder system name to extract (matches type/subtype, incl. proA)
+  system: "Prometheus"           # DefenseFinder system type(s) to extract: EXACT type/subtype match
+                                 # (comma-separated; the first is the focal type)
+  # --- quality / matching (defaults shown; matched to the archaeal primary filter) ---
+  max_contamination: 5.0         # pass_primary = completeness >= min_completeness AND contamination <= this
+  allow_missing_proteins: false  # true: genomes whose proteome or hit id is missing are reported, not fatal
+  min_tree_match_fraction: 0.9   # fail if < this fraction of genomes match a tip of gtdb_bac_tree
+  gtdb_bac_taxonomy: ""          # optional GTDB bac120_taxonomy.tsv of the tree release: maps genomes that are
+                                 # not tree tips to the tip representing their species
+  # covariates: ["completeness", "genome_size"]   # bacterial ecology covariates (default: ecology.covariates)
+  # --- cross-domain phylogeny / transfer direction (crossdomain_analysis.py) ---
+  crossdomain:
+    min_ufboot: 95               # branches below SH-aLRT/UFBoot thresholds are collapsed for the
+    min_alrt: 80                 # *_supported metrics and the robust direction call
+    n_subsample: 200             # balanced subsamples (larger domain thinned to the smaller one)
+    subsample_min: 5             # floor on the subsample size per domain
+    robust_fraction: 0.95        # direction called only if it holds in >= this fraction of
+                                 # UFBoot replicate trees AND of balanced subsamples
+    ref_domain: "Bacteria"       # Prometheus_ref tips count as Bacteria ('exclude' = missing)
+    saturation_pairs: 200        # NG86 pairwise codon pairs sampled per class (within A, within B, cross-domain)
+    saturation_ds: 3.0           # a pair is saturated if dS is undefined or > this; dnds_saturation_warning =
+                                 # > 50% of cross-domain pairs saturated (cross-domain dN/dS is exploratory)
+    # max_codon_drop_frac: 0.05  # default: evolution.max_cds_drop_frac
 
 # ---- Intrinsic disorder (OPT-IN; ProA/Prometheus IDR comparison) -------
 # Per-residue disorder is predicted by CONSENSUS of two independent methods and
@@ -208,22 +339,29 @@ bacteria:
 disorder:
   enabled: false                 # set true to build the disorder module (`disorder` target)
   # --- consensus predictors (a residue is 'disordered' only where BOTH agree) ---
-  # metapredict is pip/conda-installable; IUPred3 is free for ACADEMIC use but
+  # metapredict (3.1.1, conda) is always used; IUPred3 is free for ACADEMIC use but
   # license-gated (download + register), so it is staged by path. When iupred3_path is
-  # unset the module falls back to metapredict + alphaPredict (both installable) and
-  # LABELS the result as the weaker (correlated) consensus.
+  # unset the second predictor is metapredict's predicted-pLDDT network (V1 = the
+  # alphaPredict network; no separate package), and the result is LABELLED as the weaker
+  # (correlated) consensus (predictors = metapredict+alphapredict).
   metapredict_threshold: 0.5     # metapredict disorder score >= this = disordered
-  iupred3_path: ""               # dir containing iupred3.py (gold-standard 2nd predictor); "" -> alphaPredict fallback
+  iupred3_path: ""               # dir containing iupred3.py (gold-standard 2nd predictor); "" -> pLDDT fallback
+  second_predictor: "auto"       # auto (IUPred3 if staged, else predicted pLDDT) | iupred3 | alphapredict | none
+  iupred3_smoothing: ""          # optional IUPred3 smoothing argument ("" = library default)
+  metapredict_version: "V3"      # metapredict network version (metapredict 3.1.1)
   iupred3_mode: "long"           # IUPred3 long- vs short-disorder mode
   iupred3_threshold: 0.5
-  alphapredict_plddt_cutoff: 50  # predicted pLDDT < this = disordered (fallback 2nd predictor)
+  alphapredict_plddt_cutoff: 50  # predicted pLDDT < this = disordered (fallback 2nd predictor; metapredict's
+                                 # bundled AlphaFold-pLDDT network, i.e. the alphaPredict model)
   min_idr_len: 12                # minimum consecutive consensus-disordered residues to call an IDR
   # --- defensibility controls ---
   intact_only: true              # restrict to catalog catalytic_status==intact & not fragmented
   mask_low_complexity: true      # segmasker (BLAST+) low-complexity; report disorder excl. LCR
   temperature_cols: []           # niche/group columns that proxy temperature -> covariate in niche tests
-  host_background: ""            # optional TSV (genome_id, background_frac_disordered) to normalise per-locus disorder
-  predictors_label: "metapredict+iupred3"   # recorded in provenance; auto-corrected to the fallback if used
+  host_background: ""            # optional TSV (genome_id, background_frac_disordered | background_frac) to normalise per-locus disorder
+  min_domain_support: 0.5        # alignment column gets a domain label when >= this fraction of annotated loci agree
+  min_column_occupancy: 0.5      # plots: show alignment columns occupied in >= this fraction of loci
+  min_group_size: 3              # minimum genomes per group for a disorder comparison
 
 # ---- Plotting (publication-ready, Adobe-Illustrator-editable) ---------
 plotting:

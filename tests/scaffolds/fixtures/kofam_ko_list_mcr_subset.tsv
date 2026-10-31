@@ -1,0 +1,6 @@
+knum	threshold	score_type	profile_type	F-measure	nseq	nseq_used	alen	mlen	eff_nseq	re/pos	definition
+K00399	741.47	full	all	1.000000	196	179	673	555	0.79	0.591	methyl-coenzyme M reductase alpha subunit [EC:2.8.4.1]
+K00401	506.80	full	all	1.000000	195	171	509	444	0.91	0.590	methyl-coenzyme M reductase beta subunit [EC:2.8.4.1]
+K00402	359.37	full	all	1.000000	195	169	306	256	0.81	0.591	methyl-coenzyme M reductase gamma subunit [EC:2.8.4.1]
+K03421	269.83	full	all	1.000000	151	127	264	204	0.77	0.591	methyl-coenzyme M reductase subunit C
+K03422	89.27	full	all	1.000000	193	169	302	157	1.94	0.590	methyl-coenzyme M reductase subunit D
